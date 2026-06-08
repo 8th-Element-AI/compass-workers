@@ -19,7 +19,6 @@ from ..base import parse_meta, path_cols
 from ..spec import MetricSpec, SpecWorker
 from ..patterns import ctx_value, aggregation_derived
 from ..predicates import llm_call
-from PII.deidentifier.presidio.engine import PresidioEngine
 
 log = logging.getLogger("signal.worker.safety")
 
@@ -61,6 +60,7 @@ class SafetyWorker(SpecWorker):
         if self._pii_engine is None:
             if _PII_PKG not in sys.path:
                 sys.path.insert(0, _PII_PKG)
+            from deidentifier.presidio.engine import PresidioEngine
             self._pii_engine = PresidioEngine.get_instance(
                 ner_model="en_core_web_sm",
             )
