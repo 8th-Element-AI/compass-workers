@@ -41,8 +41,10 @@ _PATTERN_DEFS: List[Tuple[str, str, float]] = [
         "IP_ADDRESS",
         0.92,
     ),
-    # URL
+    # URL — https/http with path
     (r"\bhttps?://[^\s/$.?#][^\s]*\b", "URL", 0.90),
+    # URL — www. prefix without protocol (e.g. www.johndoe.com)
+    (r"\bwww\.[a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:[/?#][^\s]*)?\b", "URL", 0.85),
     # IBAN — 2 letter country code + 2 check digits + 11-30 alphanumeric
     (r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b", "IBAN_CODE", 0.80),
     # US Passport — one letter + 8 digits
@@ -52,12 +54,20 @@ _PATTERN_DEFS: List[Tuple[str, str, float]] = [
     # ZIP code — needs context word nearby (checked via lookahead window)
     (r"(?i)(?:zip(?:\s*code)?|postal\s+code)[:\s]+(\d{5}(?:-\d{4})?)", "ZIP_CODE", 0.90),
     (r"\b\d{5}-\d{4}\b", "ZIP_CODE", 0.90),  # ZIP+4 format is unambiguous
-    # Medical Record Number
+    # Medical Record Number — keyword adjacent to digit-only ID
     (
-        r"(?i)\b(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+ID)"
+        r"(?i)\b(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+I(?:D|dentification))"
         r"[:\s#\-]*\d{4,10}\b",
         "MEDICAL_RECORD_NUMBER",
         0.92,
+    ),
+    # Medical Record Number — keyword adjacent to alphanumeric ID (e.g. RF-203948, MGH-884721)
+    (
+        r"(?i)\b(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+I(?:D|dentification)|"
+        r"Insurance\s+Policy|Policy)\s*(?:No\.?|Number|#)?"
+        r"[:\s#\-]+[A-Z]{2,4}-[A-Z0-9]{2,8}(?:-[A-Z0-9]{2,8})?\b",
+        "MEDICAL_RECORD_NUMBER",
+        0.90,
     ),
     (r"\bMRN[-\s]?(?:[A-Z]+[-\s])?\d{6,10}\b", "MEDICAL_RECORD_NUMBER", 0.88),
     # Date of birth — must have context keyword

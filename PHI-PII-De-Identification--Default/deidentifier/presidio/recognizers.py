@@ -55,18 +55,43 @@ def _build_mrn_recognizer():
     return PatternRecognizer(
         supported_entity="MEDICAL_RECORD_NUMBER",
         patterns=[
+            # Keyword immediately adjacent to pure-digit ID
             Pattern(
                 name="mrn_keyword_digits",
                 regex=(
-                    r"(?i)(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+ID)"
+                    r"(?i)(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+I(?:D|dentification))"
                     r"[:\s#\-]*\d{4,10}"
                 ),
                 score=0.92,
+            ),
+            # Keyword immediately adjacent to alphanumeric ID (e.g. "Patient ID RF-203948")
+            Pattern(
+                name="mrn_keyword_alphanum",
+                regex=(
+                    r"(?i)(?:MRN|Medical\s+Record(?:\s+No\.?)?|Patient\s+I(?:D|dentification)|"
+                    r"Insurance\s+Policy|Policy)\s*(?:No\.?|Number|#)?"
+                    r"[:\s#\-]+[A-Z]{2,4}-[A-Z0-9]{2,8}(?:-[A-Z0-9]{2,8})?"
+                ),
+                score=0.90,
             ),
             Pattern(
                 name="mrn_prefix_attached",
                 regex=r"\bMRN[-\s]?\d{6,10}\b",
                 score=0.88,
+            ),
+            # Bare alphanumeric hospital/clinic ID (e.g. RF-203948, MGH-884721)
+            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            Pattern(
+                name="mrn_alpha_prefix_numeric",
+                regex=r"\b[A-Z]{2,4}-\d{4,8}\b",
+                score=0.55,
+            ),
+            # Compound alphanumeric ID (e.g. HLT-9982-AX19 insurance policy)
+            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            Pattern(
+                name="mrn_compound_alpha",
+                regex=r"\b[A-Z]{2,4}-\d{2,6}-[A-Z0-9]{2,6}\b",
+                score=0.55,
             ),
             Pattern(
                 name="mrn_bare_number",
@@ -75,10 +100,20 @@ def _build_mrn_recognizer():
             ),
         ],
         context=[
-            "mrn", "medical record", "medical record number", "patient id",
-            "record number", "chart", "chart number", "encounter", "case number",
-            "file number", "registration", "visit number", "member id",
-            "health record", "emr", "ehr", "record #",
+            # Single-word entries (effective in substring mode, 5-token window)
+            "mrn", "chart", "encounter", "registration", "emr", "ehr",
+            "policy",           # catches "insurance policy number was HLT-9982-AX19"
+            "identification",   # catches "patient identification number was RF-203948"
+            "hospital",         # catches "hospital stay was MGH-884721" (token at -3)
+            "record",           # catches "record number", "medical record"
+            "medical",          # catches "medical record number"
+            # Multi-word phrases (only work if the full phrase fits in one token — kept for
+            # future compatibility with whole_word matching mode)
+            "medical record", "medical record number", "patient id",
+            "patient identification", "patient identification number",
+            "identification number", "record number", "chart number",
+            "case number", "file number", "visit number", "member id",
+            "health record", "record #", "policy number", "insurance policy",
         ],
     )
 
@@ -220,6 +255,37 @@ def _build_mbi_recognizer():
     )
 
 
+def _build_url_recognizer():
+    from presidio_analyzer import Pattern, PatternRecognizer
+
+    return PatternRecognizer(
+        supported_entity="URL",
+        patterns=[
+            # www. prefix — high confidence, no context needed
+            Pattern(
+                name="url_www_prefix",
+                regex=r"\bwww\.[a-zA-Z0-9][a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:[/?#][^\s]*)?\b",
+                score=0.85,
+            ),
+            # Bare domain with common TLDs (e.g. johndoe.com, rajeshweber.net)
+            # score 0.50 → boosted to 0.85 when context keyword nearby
+            Pattern(
+                name="url_bare_common_tld",
+                regex=(
+                    r"\b[a-zA-Z0-9][a-zA-Z0-9\-]+"
+                    r"\.(?:com|net|org|io|co|me|info|edu|gov|mil)\b"
+                ),
+                score=0.50,
+            ),
+        ],
+        context=[
+            "website", "blog", "site", "portfolio", "online", "visit",
+            "www", "web", "url", "link", "page", "profile", "personal",
+            "my site", "my website", "my blog", "my page",
+        ],
+    )
+
+
 def _build_org_recognizer():
     from presidio_analyzer import EntityRecognizer, RecognizerResult
 
@@ -264,4 +330,5 @@ def register_all(registry) -> None:
     registry.add_recognizer(_build_npi_recognizer())
     registry.add_recognizer(_build_bank_number_recognizer())
     registry.add_recognizer(_build_mbi_recognizer())
+    registry.add_recognizer(_build_url_recognizer())
     registry.add_recognizer(_build_org_recognizer())

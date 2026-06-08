@@ -11,20 +11,17 @@ presidio_analyzer = pytest.importorskip("presidio_analyzer", reason="presidio-an
 presidio_anonymizer = pytest.importorskip("presidio_anonymizer", reason="presidio-anonymizer not installed")
 
 from deidentifier.config import PolicyConfig
-from deidentifier.engine import DeidentificationResult
+from deidentifier.result import DeidentificationResult
 from deidentifier.entities import Strategy
 from deidentifier.presidio.engine import PresidioEngine
 
 
-# ---------------------------------------------------------------------------
-# Shared fixture — one engine instance for the module (spaCy load is expensive)
-# ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def engine():
     try:
-        return PresidioEngine()
-    except OSError:
-        pytest.skip("spaCy model en_core_web_trf not installed")
+        return PresidioEngine(ner_model=None)
+    except OSError as exc:
+        pytest.skip(f"spaCy model not installed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +113,7 @@ class TestStrategyMapping:
             "entities": {"EMAIL_ADDRESS": {"strategy": "redact", "enabled": True}},
         })
         try:
-            eng = PresidioEngine(policy=policy)
+            eng = PresidioEngine(ner_model=None, policy=policy)
         except OSError:
             pytest.skip("spaCy model not installed")
         result = eng.process("Email: test@example.com")
@@ -129,7 +126,7 @@ class TestStrategyMapping:
             "entities": {"EMAIL_ADDRESS": {"strategy": "mask", "enabled": True}},
         })
         try:
-            eng = PresidioEngine(policy=policy)
+            eng = PresidioEngine(ner_model=None, policy=policy)
         except OSError:
             pytest.skip("spaCy model not installed")
         result = eng.process("Email: test@example.com")
@@ -142,7 +139,7 @@ class TestStrategyMapping:
             "entities": {"EMAIL_ADDRESS": {"strategy": "replace", "enabled": True}},
         })
         try:
-            eng = PresidioEngine(policy=policy)
+            eng = PresidioEngine(ner_model=None, policy=policy)
         except OSError:
             pytest.skip("spaCy model not installed")
         result = eng.process("Email: test@example.com")
@@ -168,7 +165,7 @@ class TestPolicyControls:
             },
         })
         try:
-            eng = PresidioEngine(policy=policy)
+            eng = PresidioEngine(ner_model=None, policy=policy)
         except OSError:
             pytest.skip("spaCy model not installed")
         result = eng.process("Email: skip@example.com")
@@ -183,7 +180,7 @@ class TestPolicyControls:
             "entities": {"ZIP_CODE": {"strategy": "redact", "enabled": True}},
         })
         try:
-            eng = PresidioEngine(policy=policy)
+            eng = PresidioEngine(ner_model=None, policy=policy)
         except OSError:
             pytest.skip("spaCy model not installed")
         # Bare 5-digit with no context keyword scores 0.30 — below threshold 0.50

@@ -37,7 +37,6 @@ DER_COLS = [
     "ts", "metric", "value", "confidence", "metric_meta", "start_ts", "end_ts",
 ]
 
-
 def to_dt(x):
     """Accept a datetime (from clickhouse-connect) or a 'YYYY-MM-DD HH:MM:SS.mmm' string (CSV)."""
     if isinstance(x, datetime):

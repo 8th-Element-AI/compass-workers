@@ -24,7 +24,7 @@ log = logging.getLogger("signal.worker.safety")
 
 _PII_PKG = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
-                 "PHI-PII-De-Identification--model-v0")
+                 "PHI-PII-De-Identification--Default")
 )
 
 LENS = "safety"
@@ -62,8 +62,7 @@ class SafetyWorker(SpecWorker):
                 sys.path.insert(0, _PII_PKG)
             from deidentifier.presidio.engine import PresidioEngine
             self._pii_engine = PresidioEngine.get_instance(
-                spacy_model="en_core_web_sm",
-                hf_model=None,
+                ner_model="en_core_web_sm",
             )
             log.info("PresidioEngine loaded for SafetyWorker.")
         return self._pii_engine
@@ -81,13 +80,13 @@ class SafetyWorker(SpecWorker):
                 "pii_types":      [],
             }
 
-        result = self.pii_engine.process(input_text, document_id=span.get("span_id"))
+        result = self.pii_engine.analyze(input_text)
 
-        pii_types = list({e.entity_type for e in result.audit_record.entries})
+        pii_types = list(result.entities.keys())
 
         return {
-            "pii_count":      float(result.audit_record.entities_processed),
-            "pii_detected":   1.0 if result.audit_record.entities_processed > 0 else 0.0,
+            "pii_count":      float(result.entity_count),
+            "pii_detected":   1.0 if result.has_pii else 0.0,
             "pii_type_count": float(len(pii_types)),
             "pii_types":      pii_types,
         }

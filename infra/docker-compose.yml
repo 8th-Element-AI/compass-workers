@@ -1,23 +1,23 @@
 name: signal
 
 services:
-  postgres:
-    image: postgres:16
-    container_name: signal-postgres
-    environment:
-      POSTGRES_DB: ${PG_DB:-signal}
-      POSTGRES_USER: ${PG_USER:-postgres}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
-    ports:
-      - "${PG_PORT:-5432}:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DB:-signal}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+  # postgres:
+  #   image: postgres:16
+  #   container_name: signal-postgres
+  #   environment:
+  #     POSTGRES_DB: ${PG_DB:-signal}
+  #     POSTGRES_USER: ${PG_USER:-postgres}
+  #     POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+  #   ports:
+  #     - "${PG_PORT:-5432}:5432"
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+  #     - ./postgres/init:/docker-entrypoint-initdb.d:ro
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DB:-signal}"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 10
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
