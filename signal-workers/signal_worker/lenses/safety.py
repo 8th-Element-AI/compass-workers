@@ -23,8 +23,8 @@ from ..predicates import llm_call
 log = logging.getLogger("signal.worker.safety")
 
 _PII_PKG = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
-                 "PHI-PII-De-Identification--Default")
+    os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                 "PII")
 )
 
 LENS = "safety"
