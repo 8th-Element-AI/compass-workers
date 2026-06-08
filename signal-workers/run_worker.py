@@ -44,6 +44,8 @@ def main(argv=None):
     ap.add_argument("--out", help="offline: write derived rows to this CSV")
     args = ap.parse_args(argv)
 
+    from dotenv import load_dotenv
+    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     worker = build_worker(args.lens, Config.from_env(), offline=bool(args.csv))
 

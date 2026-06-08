@@ -131,8 +131,11 @@ class BaseWorker:
             return "1970-01-01 00:00:00.000"
 
     def save_watermark(self, wm: str):
-        with open(self._state_path(), "w") as f:
+        path = self._state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             f.write(wm)
+        os.replace(tmp, path)
 
     # ---- fetch a batch of spans newer than the watermark ----
     def fetch_batch(self, since: str, limit: int):

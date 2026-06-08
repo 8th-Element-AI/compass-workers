@@ -13,30 +13,8 @@ from collections import defaultdict
 from signal_worker.config import Config
 from signal_worker.lenses.performance import PerformanceWorker
 
-csv.field_size_limit(50_000_000)
 
-RAW = sys.argv[1] if len(sys.argv) > 1 else "signal_raw_spans.csv"
-DER = sys.argv[2] if len(sys.argv) > 2 else "signal_derived_metrics.csv"
-
-# 1) run the worker
-w = PerformanceWorker(Config.from_env())
-produced = w.run_csv(RAW)
-
-prod = defaultdict(dict)  # (span_id, scope) -> {metric: value}
-metric_counts = defaultdict(int)
-for r in produced:
-    prod[(r["span_id"], r["scope"])][r["metric"]] = r["value"]
-    metric_counts[r["metric"]] += 1
-
-# 2) load mock derived for the same metrics
-mock = defaultdict(dict)
-with open(DER, newline="") as f:
-    for r in csv.DictReader(f):
-        if r["metric"] in ("latency", "error_rate", "timeout_count"):
-            mock[(r["span_id"], r["scope"])][r["metric"]] = float(r["value"])
-
-# 3) compare
-def compare(metric, tol):
+def compare(metric, tol, prod, mock):
     n = ok = 0
     worst = 0.0
     for key, mvals in mock.items():
@@ -53,29 +31,61 @@ def compare(metric, tol):
     pct = 100.0 * ok / n if n else 0.0
     print(f"  {metric:14} compared={n:>7}  within_tol={pct:6.2f}%  max_diff={worst:.4f}")
 
-print("== Performance worker output ==")
-print(f"  total metric rows produced: {len(produced)}")
-print("  rows per metric:")
-for m in sorted(metric_counts):
-    print(f"    {m:22} {metric_counts[m]:>7}")
-print()
-print("== match vs mock derived (column-derivable metrics) ==")
-compare("latency", tol=1.5)        # ms rounding between stored ms timestamps and generated duration
-compare("error_rate", tol=0.0)
-compare("timeout_count", tol=0.0)
 
-# 4) which mock perf metrics are NOT reproduced (need instrumented raw attributes)
-mock_perf = set()
-PERF = {"latency","error_rate","timeout_count","throughput","time_to_first_token","inter_token_latency",
-        "queue_wait_time","scheduling_delay","retry_count","retry_delay","rate_limit_wait","rate_limit_hit",
-        "records_processed","batch_size","concurrency","messages_in_flight"}
-with open(DER, newline="") as f:
-    for r in csv.DictReader(f):
-        if r["metric"] in PERF:
-            mock_perf.add(r["metric"])
-produced_metrics = set(metric_counts)
-print()
-print("== perf metrics in mock but NOT yet produced by the worker ==")
-print("   (these need the runtime to record the raw attribute in span metadata)")
-for m in sorted(mock_perf - produced_metrics):
-    print(f"    {m}")
+def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    csv.field_size_limit(50_000_000)
+
+    raw = sys.argv[1] if len(sys.argv) > 1 else "signal_raw_spans.csv"
+    der = sys.argv[2] if len(sys.argv) > 2 else "signal_derived_metrics.csv"
+
+    # 1) run the worker
+    w = PerformanceWorker(Config.from_env())
+    produced = w.run_csv(raw)
+
+    prod = defaultdict(dict)
+    metric_counts = defaultdict(int)
+    for r in produced:
+        prod[(r["span_id"], r["scope"])][r["metric"]] = r["value"]
+        metric_counts[r["metric"]] += 1
+
+    # 2) load mock derived for the same metrics
+    mock = defaultdict(dict)
+    with open(der, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["metric"] in ("latency", "error_rate", "timeout_count"):
+                mock[(r["span_id"], r["scope"])][r["metric"]] = float(r["value"])
+
+    # 3) compare
+    print("== Performance worker output ==")
+    print(f"  total metric rows produced: {len(produced)}")
+    print("  rows per metric:")
+    for m in sorted(metric_counts):
+        print(f"    {m:22} {metric_counts[m]:>7}")
+    print()
+    print("== match vs mock derived (column-derivable metrics) ==")
+    compare("latency",       tol=1.5, prod=prod, mock=mock)
+    compare("error_rate",    tol=0.0, prod=prod, mock=mock)
+    compare("timeout_count", tol=0.0, prod=prod, mock=mock)
+
+    # 4) which mock perf metrics are NOT reproduced (need instrumented raw attributes)
+    mock_perf = set()
+    PERF = {"latency","error_rate","timeout_count","throughput","time_to_first_token","inter_token_latency",
+            "queue_wait_time","scheduling_delay","retry_count","retry_delay","rate_limit_wait","rate_limit_hit",
+            "records_processed","batch_size","concurrency","messages_in_flight"}
+    with open(der, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["metric"] in PERF:
+                mock_perf.add(r["metric"])
+    produced_metrics = set(metric_counts)
+    print()
+    print("== perf metrics in mock but NOT yet produced by the worker ==")
+    print("   (these need the runtime to record the raw attribute in span metadata)")
+    for m in sorted(mock_perf - produced_metrics):
+        print(f"    {m}")
+
+
+if __name__ == "__main__":
+    main()

@@ -40,7 +40,7 @@ class SpecWorker(BaseWorker):
         level = span.get("scope") or span.get("span_type")
         if level == "solution":
             return ["solution", "endpoint"] if (span.get("endpoint") or "") else ["solution"]
-        return [span.get("scope") or "solution"]
+        return [level]
 
     def owns(self) -> set:
         return {s.metric for s in self.specs}
