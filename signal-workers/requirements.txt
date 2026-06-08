@@ -1,3 +1,14 @@
+# ============================================================================
+# Signal Workers — runtime dependencies
+# ============================================================================
+# Install (from the signal-workers/ directory, with the PII repo sitting beside it):
+#     pip install -r requirements.txt
+#
+# The PII module ships as its own pip-installable package and is referenced by
+# path below. Adjust the path if your repo layout differs (or replace with a
+# Git URL once published).
+# ============================================================================
+
 # Required for live mode (connecting to ClickHouse over HTTP)
 clickhouse-connect>=0.7
 
@@ -6,3 +17,18 @@ psycopg[binary]>=3.1
 
 # Loads .env into os.environ
 python-dotenv>=1.0
+
+# PII detection module (Presidio-backed) — required by the Safety lens.
+# Editable install from the sibling PII/ directory. Pulls in its own deps
+# (presidio-analyzer, presidio-anonymizer, spacy, faker, pyyaml).
+#
+# After install you must download the spaCy model used by Presidio:
+#     python -m spacy download en_core_web_sm
+#
+# To use a HuggingFace NER model instead (better recall, ~330 ms/doc),
+# pre-cache it once and set SIGNAL_PII_NER_MODEL:
+#     python -c "from transformers import pipeline; \
+#                pipeline('ner', model='gravitee-io/bert-small-pii-detection', \
+#                aggregation_strategy='first')"
+#     export SIGNAL_PII_NER_MODEL=gravitee-io/bert-small-pii-detection
+-e ../PII
