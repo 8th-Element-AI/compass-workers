@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"d:\\\\projects\\\\deidentifer\" -Force | Select-Object Name, @{N='Type';E={if\\($_.PSIsContainer\\){'Directory'}else{'File'}}} | Format-Table -AutoSize)",
+      "Bash(cd /d/projects && ls -la)",
+      "Read(//d/projects/**)",
+      "Bash(pip install *)",
+      "Bash(python -c ' *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.10/bin/python3:*)",
+      "Bash(source:*)",
+      "Bash(python:*)",
+      "Bash(du:*)"
+    ]
+  }
+}

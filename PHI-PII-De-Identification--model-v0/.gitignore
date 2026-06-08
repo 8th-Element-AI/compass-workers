@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+audit.jsonl
+.pytest_cache/
+eval/data/*.json
+eval/data/*.csv
+eval/output.json

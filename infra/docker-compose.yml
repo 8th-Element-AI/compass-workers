@@ -25,7 +25,7 @@ services:
     environment:
       CLICKHOUSE_DB: ${CH_DB:-signal}
       CLICKHOUSE_USER: ${CH_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CH_PASSWORD:-}
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD:-clickhouse}
     ports:
       - "${CH_HTTP_PORT:-8123}:8123"   # HTTP — used by the workers
       - "${CH_TCP_PORT:-9000}:9000"    # native client

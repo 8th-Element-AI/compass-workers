@@ -20,11 +20,12 @@ from signal_worker.config import Config
 from signal_worker.base import DER_COLS
 from signal_worker.lenses.performance import PerformanceWorker
 from signal_worker.lenses.cost import CostWorker
+from signal_worker.lenses.safety import SafetyWorker
 
 LENSES = {
     "performance": PerformanceWorker,
     "cost": CostWorker,
-    # quality, safety, outcomes -> added as each lens lands
+    "safety": SafetyWorker
 }
 
 
