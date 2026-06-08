@@ -21,6 +21,7 @@ import logging
 import sys
 from collections import defaultdict
 from pathlib import Path
+from PII.deidentifier.presidio.engine import PresidioEngine
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -31,7 +32,7 @@ class _TimingsOnly(logging.Filter):
 _handler = logging.StreamHandler()
 _handler.setFormatter(logging.Formatter("%(name)s — %(message)s"))
 _handler.addFilter(_TimingsOnly())
-_engine_logger = logging.getLogger("deidentifier.presidio.engine")
+_engine_logger = logging.getLogger("PII.deidentifier.presidio.engine")
 _engine_logger.setLevel(logging.INFO)
 _engine_logger.addHandler(_handler)
 _engine_logger.propagate = False
@@ -126,7 +127,6 @@ def evaluate(
         )
         sys.exit(1)
 
-    from deidentifier.presidio.engine import PresidioEngine
     engine = PresidioEngine.get_instance()
 
     tp: dict[str, int] = defaultdict(int)

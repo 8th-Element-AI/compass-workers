@@ -23,7 +23,7 @@ with its own checkpoint, so they scale and deploy independently. Built today:
 
 ```
 signal-workers/
-├── run_worker.py            CLI entrypoint — launches ONE lens per invocation
+├── run_worker.py            CLI entrypoint — launches one or all lenses
 ├── show_specs.py            print a lens's metric registry as a table
 ├── validate_performance.py  offline correctness check vs the mock derived data
 ├── requirements.txt
@@ -113,14 +113,16 @@ export WORKER_STATE_DIR="$PWD/state"
 ## 5. Run (live, against ClickHouse/Postgres)
 
 ```bash
-python run_worker.py performance          # continuous poll loop
-python run_worker.py performance --once   # process one batch, then exit
-python run_worker.py cost --once          # Cost lens (reads prices from Postgres)
+python run_worker.py --worker all                # run all lenses concurrently
+python run_worker.py --worker performance        # continuous poll loop, one lens
+python run_worker.py --worker performance --once # process one batch, then exit
+python run_worker.py --worker cost --once        # Cost lens (reads prices from Postgres)
+python run_worker.py --worker all --once         # one batch each, all lenses, then exit
 ```
 
-Each command starts **one** worker for the named lens. The worker pulls spans
-with `recorded_at > watermark`, computes metrics, inserts into
-`signal_derived_metrics`, and advances its watermark.
+Each lens runs in its own thread (when using `--worker all`) or as the main
+process (single lens). The worker pulls spans with `recorded_at > watermark`,
+computes metrics, inserts into `signal_derived_metrics`, and advances its watermark.
 
 **Each lens has its own watermark**, so they run fully independently:
 
@@ -138,7 +140,7 @@ Delete that lens's watermark to make it reprocess from scratch:
 
 ```powershell
 Remove-Item .\state\cost.watermark -ErrorAction SilentlyContinue
-python run_worker.py cost --once
+python run_worker.py --worker cost --once
 ```
 
 > ⚠️ Reprocessing **appends** to `signal_derived_metrics` (it's an append-only
@@ -151,7 +153,7 @@ For a one-shot backfill, a bigger batch means a single fetch + single insert:
 
 ```powershell
 $env:WORKER_BATCH="20000"
-python run_worker.py performance --once
+python run_worker.py --worker performance --once
 ```
 
 ---
@@ -163,8 +165,8 @@ lens is validated.
 
 ```bash
 # write a lens's output to a CSV
-python run_worker.py performance --csv signal_raw_spans.csv --out perf_derived.csv
-python run_worker.py cost        --csv signal_raw_spans.csv --out cost_derived.csv
+python run_worker.py --worker performance --csv signal_raw_spans.csv --out perf_derived.csv
+python run_worker.py --worker cost        --csv signal_raw_spans.csv --out cost_derived.csv
 ```
 
 The Cost lens in `--csv` mode uses the known seed prices (no Postgres needed).

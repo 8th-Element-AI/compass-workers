@@ -453,7 +453,7 @@ def run_model(
     data_path: str,
     max_docs: int,
 ) -> None:
-    from deidentifier.presidio.engine import PresidioEngine
+    from PII.deidentifier.presidio.engine import PresidioEngine
     from presidio_analyzer.nlp_engine import TransformersNlpEngine, NerModelConfiguration
 
     print(f"\nLoading {model_id} …")
