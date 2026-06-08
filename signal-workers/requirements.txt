@@ -3,3 +3,6 @@ clickhouse-connect>=0.7
 
 # Required by the Cost lens (and up) to read pricing from Postgres components table.
 psycopg[binary]>=3.1
+
+# Loads .env into os.environ
+python-dotenv>=1.0
