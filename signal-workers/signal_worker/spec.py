@@ -9,8 +9,9 @@ walks the registered specs, runs the applicable ones, and emits derived rows. A
 lens becomes a tiny subclass that sets `lens`, `specs`, and `build_context`.
 """
 from __future__ import annotations
+import json
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 
 from .base import BaseWorker, path_cols, DER_COLS
 
@@ -19,13 +20,18 @@ from .base import BaseWorker, path_cols, DER_COLS
 class MetricSpec:
     metric: str
     lens: str
-    applies: Callable           # (span) -> bool
-    pattern: Callable           # (span, ctx) -> float | None
+    applies: Callable                       # (span) -> bool
+    pattern: Callable                       # (span, ctx) -> float | None
     inputs: list = field(default_factory=list)
     unit: str = ""
     window: str = "5m"
     threshold: bool = False
-    per_span: bool = True       # False => computed at read time, not by compute()
+    per_span: bool = True                   # False => computed at read time, not by compute()
+    # NEW: optional per-row metric_meta. Returns a dict (serialized to JSON in
+    # the metric_meta column) or None. Used e.g. by the Safety lens to attach the
+    # detected entity types + location to a pii_count row. Generic — any future
+    # lens needing per-row evidence uses this hook instead of overriding compute.
+    meta_fn: Optional[Callable] = None      # (span, ctx) -> dict | None
 
 
 class SpecWorker(BaseWorker):
@@ -45,8 +51,8 @@ class SpecWorker(BaseWorker):
     def owns(self) -> set:
         return {s.metric for s in self.specs}
 
-    def _row(self, p: dict, span: dict, metric: str, value: float):
-        return {
+    def _row(self, p: dict, span: dict, spec: "MetricSpec", value: float, ctx: dict):
+        row = {
             "span_id": span["span_id"],
             "trace_id": span.get("trace_id", "") or "",
             "parent_span_id": span.get("parent_span_id", "") or "",
@@ -59,13 +65,19 @@ class SpecWorker(BaseWorker):
             "component_type": p["component_type"],
             "environment": p["environment"],
             "ts": span["ended_at"],
-            "metric": metric,
+            "metric": spec.metric,
             "value": float(value),
             "confidence": None,
             "metric_meta": None,
             "start_ts": span["started_at"],
             "end_ts": span["ended_at"],
         }
+        # generic per-row metadata hook (replaces per-lens compute() overrides)
+        if spec.meta_fn is not None:
+            meta = spec.meta_fn(span, ctx)
+            if meta:
+                row["metric_meta"] = json.dumps(meta, separators=(",", ":"))
+        return row
 
     def compute(self, span: dict) -> list:
         if self.span_types and span.get("span_type") not in self.span_types:
@@ -82,5 +94,14 @@ class SpecWorker(BaseWorker):
                 val = spec.pattern(span, ctx)
                 if val is None:          # nothing to emit (e.g. attribute absent)
                     continue
-                rows.append(self._row(p, span, spec.metric, val))
+                rows.append(self._row(p, span, spec, val, ctx))
+        return rows
+
+    # ---- batch hook: lenses with expensive per-text inference (Safety / Quality)
+    # override this to run their model on a whole batch at once. Default just
+    # loops compute() — cheap lenses (Performance, Cost) don't need to override.
+    def process_batch(self, spans: list) -> list:
+        rows = []
+        for span in spans:
+            rows.extend(self.compute(span))
         return rows
