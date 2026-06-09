@@ -9,7 +9,11 @@ A lens worker only has to declare which metrics it owns and implement
   * persisting the watermark so restarts resume cleanly,
   * a `run_csv()` path so the exact same compute logic can be validated
     offline against an exported spans CSV (no ClickHouse needed),
-  * a `on_message()` hook shaped for a future NATS consumer.
+  * a `on_message()` hook shaped for a future NATS consumer,
+  * a `process_batch(spans)` hook for lenses with expensive per-text inference
+    (Safety/Quality) — they override it to batch one model call across many
+    spans; cheap lenses (Performance, Cost) inherit the default loop,
+  * a `threading.Event`-based shutdown so workers stop cleanly on Ctrl+C.
 
 The 25 raw columns and 18 derived columns mirror the loaded schema exactly.
 """
@@ -17,9 +21,9 @@ from __future__ import annotations
 import os
 import csv
 import json
-import time
+import threading
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 log = logging.getLogger("signal.worker")
 
@@ -97,6 +101,8 @@ class BaseWorker:
     def __init__(self, cfg):
         self.cfg = cfg
         self._ch = None
+        # Shutdown signal — set by stop() to terminate run_poll cleanly between batches.
+        self._stop_event = threading.Event()
 
     # ---- which metrics this lens is responsible for (for logging/guardrails) ----
     def owns(self) -> set:
@@ -106,6 +112,14 @@ class BaseWorker:
     def compute(self, span: dict) -> list:
         """Return a list of derived rows (dicts keyed by DER_COLS) for one span."""
         raise NotImplementedError
+
+    # ---- optional batch hook (overridden by SpecWorker; lenses can override again
+    # to do expensive model inference across many spans in one call) ----
+    def process_batch(self, spans: list) -> list:
+        rows = []
+        for span in spans:
+            rows.extend(self.compute(span))
+        return rows
 
     # ---- ClickHouse (lazy import so offline/CSV use needs no driver) ----
     def ch(self):
@@ -158,41 +172,51 @@ class BaseWorker:
         data = [[r.get(c) for c in DER_COLS] for r in rows]
         self.ch().insert("signal_derived_metrics", data, column_names=DER_COLS)
 
+    # ---- shutdown signal (used by main process on Ctrl+C / SIGTERM) ----
+    def stop(self):
+        log.info("[%s] stop requested", self.lens)
+        self._stop_event.set()
+
     # ---- poll loop (production-ish) ----
     def run_poll(self, once: bool = False):
         log.info("[%s] starting poll loop (batch=%d)", self.lens, self.cfg.batch_size)
-        while True:
+        while not self._stop_event.is_set():
             wm = self.load_watermark()
             spans = self.fetch_batch(wm, self.cfg.batch_size)
             if spans:
-                out, newest = [], wm
+                rows = self.process_batch(spans)
+                newest = wm
                 for s in spans:
-                    out.extend(self.compute(s))
                     rec = str(s["recorded_at"])
                     if rec > newest:
                         newest = rec
-                self.write(out)
+                self.write(rows)
                 self.save_watermark(newest)
-                log.info("[%s] %d spans -> %d metrics (wm=%s)", self.lens, len(spans), len(out), newest)
-            if once or not spans:
-                if once:
-                    break
-                time.sleep(self.cfg.poll_sec)
+                log.info("[%s] %d spans -> %d metrics (wm=%s)", self.lens, len(spans), len(rows), newest)
+            if once:
+                break
+            # Wait on the stop event instead of sleeping — wakes immediately on stop().
+            if not spans:
+                self._stop_event.wait(self.cfg.poll_sec)
+        log.info("[%s] poll loop exited", self.lens)
 
     # ---- NATS-shaped hook for later (subscribe to span events, compute, write) ----
     def on_message(self, span: dict):
-        rows = self.compute(span)
+        rows = self.process_batch([span])
         self.write(rows)
         return rows
 
-    # ---- offline validation: run the SAME compute over an exported spans CSV ----
+    # ---- offline validation: run the SAME process_batch over an exported spans CSV ----
     def run_csv(self, spans_csv: str):
-        out = []
+        spans = []
         with open(spans_csv, newline="") as f:
             for span in csv.DictReader(f):
                 # normalise CSV null token
                 for k, v in list(span.items()):
                     if v == "\\N":
                         span[k] = None
-                out.extend(self.compute(span))
-        return out
+                spans.append(span)
+        # Apply the span_type filter in offline mode too (live mode does it in SQL).
+        if self.span_types:
+            spans = [s for s in spans if s.get("span_type") in self.span_types]
+        return self.process_batch(spans)

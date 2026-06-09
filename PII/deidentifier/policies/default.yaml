@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=
+version: "1.0"
+default_strategy: redact
+score_threshold: 0.7
+terms: []
+
+entities:
+  PERSON:
+    strategy: replace
+    enabled: true
+  EMAIL_ADDRESS:
+    strategy: redact
+    enabled: true
+  PHONE_NUMBER:
+    strategy: redact
+    enabled: true
+  US_SSN:
+    strategy: redact
+    enabled: true
+  CREDIT_CARD:
+    strategy: mask
+    enabled: true
+  DATE_TIME:
+    strategy: replace
+    enabled: true
+  DATE_OF_BIRTH:
+    strategy: redact
+    enabled: true
+  LOCATION:
+    strategy: replace
+    enabled: true
+  US_DRIVER_LICENSE:
+    strategy: redact
+    enabled: true
+  US_PASSPORT:
+    strategy: redact
+    enabled: true
+  IP_ADDRESS:
+    strategy: redact
+    enabled: true
+  IBAN_CODE:
+    strategy: redact
+    enabled: true
+  MEDICAL_LICENSE:
+    strategy: redact
+    enabled: true
+  MEDICAL_RECORD_NUMBER:
+    strategy: redact
+    enabled: true
+  URL:
+    strategy: redact
+    enabled: true
+  US_BANK_NUMBER:
+    strategy: redact
+    enabled: true
+  AGE:
+    strategy: replace
+    enabled: true
+  ZIP_CODE:
+    strategy: mask
+    enabled: true
+  NRP:
+    strategy: replace
+    enabled: true
+  MEDICARE_ID:
+    strategy: redact
+    enabled: true
+  ORG:
+    strategy: replace
+    enabled: true
