@@ -113,12 +113,6 @@ def _make_operator(strategy: Strategy, entity: str) -> "OperatorConfig":
         return OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 500, "from_end": False})
     return OperatorConfig("replace", {"new_value": f"<{entity}>"})
 
-
-# Default model resolved from env at module import.
-_DEFAULT_NER_MODEL = os.getenv("DEIDENTIFIER_NER_MODEL", "gravitee-io/bert-small-pii-detection")
-_DEFAULT_NER_MODEL = _DEFAULT_NER_MODEL or None        # empty string -> None (regex-only)
-
-
 class PresidioEngine:
     """Single configurable de-identification engine.
 
@@ -145,7 +139,7 @@ class PresidioEngine:
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
-                    chosen = ner_model if ner_model is not None else _DEFAULT_NER_MODEL
+                    chosen = ner_model
                     cls._instance = cls(
                         ner_model=chosen, policy=policy, audit_logger=audit_logger,
                     )

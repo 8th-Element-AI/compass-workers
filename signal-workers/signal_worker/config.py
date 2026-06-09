@@ -27,7 +27,7 @@ class Config(BaseSettings):
       default="default",
       alias="CH_USER"
     )
-    
+
     ch_password: str = Field(
       default="",
       alias="CH_PASSWORD"
@@ -54,7 +54,7 @@ class Config(BaseSettings):
     )
 
     signal_pii_ner_model: str = Field(
-      default="en_core_web_sm",
+      default="gravitee-io/bert-small-pii-detection",
       alias="SIGNAL_PII_NER_MODEL"
     )
 

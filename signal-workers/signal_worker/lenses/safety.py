@@ -30,12 +30,6 @@ log = logging.getLogger("signal.worker.safety")
 
 LENS = "safety"
 
-# Tunables
-_CACHE_MAX = int(os.getenv("SIGNAL_PII_CACHE_MAX", "20000"))    # LRU cap on per-process content cache
-_BATCH_CONCURRENCY = int(os.getenv("SIGNAL_PII_BATCH", "4"))    # texts analyzed in parallel
-_NER_MODEL = os.getenv("SIGNAL_PII_NER_MODEL", "en_core_web_sm")  # see PII README
-
-
 def _spec(metric, applies, pattern, inputs, unit, window="1h",
           threshold=False, per_span=True, meta_fn=None):
     return MetricSpec(
@@ -88,6 +82,11 @@ class SafetyWorker(SpecWorker):
 
     def __init__(self, cfg):
         super().__init__(cfg)
+
+        self.cache_max = cfg.pii_cache_max
+        self.batch_concurrency = cfg.pii_batch
+        self.ner_model = cfg.pii_ner_model
+
         self._pii_engine = None
         self._cache: "OrderedDict[str, object]" = OrderedDict()  # hash -> AnalysisResult
         self._cache_lock = threading.Lock()
@@ -97,8 +96,8 @@ class SafetyWorker(SpecWorker):
     def pii_engine(self):
         if self._pii_engine is None:
             from deidentifier import PresidioEngine
-            log.info("[safety] loading PresidioEngine (ner_model=%s)", _NER_MODEL)
-            self._pii_engine = PresidioEngine.get_instance(ner_model=_NER_MODEL)
+            log.info("[safety] loading PresidioEngine (ner_model=%s)", self.ner_model)
+            self._pii_engine = PresidioEngine.get_instance(ner_model=self.ner_model)
         return self._pii_engine
 
     # ---- LRU helpers ----
@@ -117,7 +116,7 @@ class SafetyWorker(SpecWorker):
         with self._cache_lock:
             self._cache[h] = result
             self._cache.move_to_end(h)
-            while len(self._cache) > _CACHE_MAX:
+            while len(self._cache) > self.cache_max:
                 self._cache.popitem(last=False)       # drop LRU
 
     # ---- batch hook: pre-fill the cache for an entire batch in ONE call ----
@@ -140,8 +139,8 @@ class SafetyWorker(SpecWorker):
             hashes = list(to_analyze.keys())
             texts = [to_analyze[h] for h in hashes]
             log.info("[safety] analyze_batch: %d unique texts (concurrency=%d)",
-                     len(texts), _BATCH_CONCURRENCY)
-            results = self.pii_engine.analyze_batch(texts, batch_size=_BATCH_CONCURRENCY)
+                     len(texts), self.batch_concurrency)
+            results = self.pii_engine.analyze_batch(texts, batch_size=self.batch_concurrency)
             for h, r in zip(hashes, results):
                 self._cache_put(h, r)
 
