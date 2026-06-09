@@ -33,4 +33,4 @@ pydantic_settings
 #                pipeline('ner', model='gravitee-io/bert-small-pii-detection', \
 #                aggregation_strategy='first')"
 #     export SIGNAL_PII_NER_MODEL=gravitee-io/bert-small-pii-detection
--e ../PII
+-e ./PII
