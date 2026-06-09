@@ -83,6 +83,7 @@ _HF_LABEL_MAP: Dict[str, str] = {
     "OTHERPHI": "NRP", "USERNAME": "NRP", "NRP": "NRP",
     "PROFESSION": "NRP", "MISC": "NRP",
     "MAC_ADDRESS": "NRP", "IMEI": "NRP", "PASSWORD": "NRP",
+    "US_ITIN": "US_SSN", "US_LICENSE_PLATE": "NRP",
 }
 
 
