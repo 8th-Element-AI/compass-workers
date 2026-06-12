@@ -103,12 +103,13 @@ class CostWorker(SpecWorker):
         per_call = rates.get("per_call", 0.0)
         per_query = rates.get("per_query", 0.0)
 
-        input_cost = (it - ct) / 1000.0 * inp_rate + ct / 1000.0 * cached_rate
+        input_cost = it / 1000.0 * inp_rate
+        cache_cost = ct / 1000.0 * cached_rate
         output_cost = ot / 1000.0 * out_rate
         embedding_cost = emb / 1000.0 * inp_rate
 
         if st == "model_call":
-            cost = input_cost + output_cost
+            cost = input_cost + output_cost + cache_cost
         elif st == "embedding":
             cost = embedding_cost
         elif st == "tool_call":

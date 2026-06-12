@@ -2,7 +2,7 @@
 
 **Scope of this document:** everything built so far — the two data stores, the
 end-to-end telemetry flow, the three ClickHouse tables and their aggregation
-layer, the worker framework (spec engine, scoping, watermarks), the two lenses
+layer, the worker framework (spec engine, scoping, checkpoints), the two lenses
 (Performance, Cost), the caching and filtering optimizations, and an honest
 production-readiness assessment.
 
@@ -189,7 +189,7 @@ The package is deliberately split into a **shared engine** and **thin lenses**:
 
 ```
 signal_worker/
-  base.py        ENGINE  — run loop, ClickHouse I/O, watermark, CSV/NATS paths
+  base.py        ENGINE  — run loop, ClickHouse I/O, checkpoint, CSV/NATS paths
   spec.py        ENGINE  — MetricSpec + SpecWorker (build-context → walk-specs → emit)
   patterns.py    SHARED  — the handful of compute shapes (~6) every metric reuses
   predicates.py  SHARED  — the "which spans" filters
@@ -285,17 +285,17 @@ dashboards have data.
 ```
 run_poll():
   loop:
-    wm    = load_watermark()                         # file: state/<lens>.watermark
+    wm    = load_checkpoint()                         # file: state/<lens>.checkpoint
     spans = fetch_batch(since=wm, limit=batch)        # recorded_at > wm ORDER BY recorded_at
     for s in spans: out += compute(s); track newest recorded_at
     write(out)                                        # single bulk insert into derived
-    save_watermark(newest)                            # restart-safe checkpoint
+    save_checkpoint(newest)                            # restart-safe checkpoint
     if --once: break  else sleep(poll_sec)
 ```
 
 Three entry paths share the **same** `compute()`:
 
-- **`run_poll`** — production-ish: poll ClickHouse by a `recorded_at` watermark.
+- **`run_poll`** — production-ish: poll ClickHouse by a `recorded_at` checkpoint.
 - **`run_csv`** — offline: run the identical logic over an exported spans CSV, no
   database. This is how every lens is validated.
 - **`on_message`** — a NATS-shaped hook for an event-driven future (subscribe to
@@ -304,15 +304,15 @@ Three entry paths share the **same** `compute()`:
 **ClickHouse connection is lazy** — imported/opened only when actually used — so
 the offline CSV path needs no driver installed.
 
-### 4.6 Watermarks — one per lens
+### 4.6 Checkpoint — one per lens
 
-The checkpoint file is keyed by lens name: `state/performance.watermark`,
-`state/cost.watermark`. Consequences:
+The checkpoint file is keyed by lens name: `state/performance.checkpoint`,
+`state/cost.checkpoint`. Consequences:
 
 - Lenses are fully independent: reset, crash, or lag one without touching another.
 - Each new lens **backfills the full history independently** on first run (its
-  watermark starts at `1970-01-01`).
-- Restart-safe: a killed worker resumes from its last saved watermark.
+  checkpoint starts at `1970-01-01`).
+- Restart-safe: a killed worker resumes from its last saved checkpoint.
 
 ---
 
@@ -425,7 +425,7 @@ exactly one lens per invocation; it's a dispatcher, not a process that runs all 
 them. In production you run them as separate services:
 
 ```
-python run_worker.py performance   # process 1 — own loop, own watermark, own replicas
+python run_worker.py performance   # process 1 — own loop, own checkpoint, own replicas
 python run_worker.py cost          # process 2 — independent
 ```
 
@@ -441,12 +441,12 @@ ones into one process later if you want — a deployment choice, not a code chan
 
 **Solid today**
 
-- **Restart-safe** — file watermark per lens; a killed worker resumes cleanly.
+- **Restart-safe** — file checkpoint per lens; a killed worker resumes cleanly.
 - **Config-driven** — all connection/tuning via env vars, sane local defaults.
 - **Lazy connections** — no driver needed for offline work; CH opened on first use.
 - **Offline-validated** — identical `compute()` runs over CSV; each lens diffed
   against reference data (Performance and Cost both verified).
-- **Independent lenses** — separate classes, processes, watermarks; isolated blast
+- **Independent lenses** — separate classes, processes, checkpoints; isolated blast
   radius.
 - **Index-aware reads + in-process pricing cache** — no per-span DB calls; reads
   only relevant spans.
@@ -458,11 +458,11 @@ ones into one process later if you want — a deployment choice, not a code chan
 **Gaps to close before calling it fully production-grade**
 
 - **Idempotency / exactly-once.** The derived table is append-only, so
-  reprocessing the same spans (watermark reset, overlapping batches) **double
+  reprocessing the same spans (checkpoint reset, overlapping batches) **double
   counts** through the MV. Today's pattern is *truncate + reload* for a full
   backfill. For safe reprocessing, key derived rows by `(span_id, metric, scope)`
   and use a `ReplacingMergeTree`, or dedupe on insert.
-- **Watermark tie at the batch edge.** `recorded_at > wm` with a `LIMIT` can skip
+- **Checkpoint tie at the batch edge.** `recorded_at > wm` with a `LIMIT` can skip
   rows that share the boundary timestamp if a tie spans the batch edge. Mitigated
   by a large batch; a robust fix is `(recorded_at, span_id)` cursor pagination.
 - **Event-driven ingest** — `on_message()` is a stub; the NATS consumer isn't

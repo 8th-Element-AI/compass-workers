@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import threading
 from collections import OrderedDict
 
@@ -37,7 +36,6 @@ def _spec(metric, applies, pattern, inputs, unit, window="1h",
         inputs=inputs, unit=unit, window=window, threshold=threshold,
         per_span=per_span, meta_fn=meta_fn,
     )
-
 
 # ---- meta_fn: attach entity types + which side the PII was on to each row ----
 def _pii_meta(span, ctx):
@@ -80,9 +78,8 @@ class SafetyWorker(SpecWorker):
     specs = SPECS
     span_types = ("model_call",)
 
-    def __init__(self, cfg):
-        super().__init__(cfg)
-
+    def __init__(self, cfg, toggle_cache=None):
+        super().__init__(cfg, toggle_cache=toggle_cache)
         self.cache_max = cfg.signal_pii_cache_max
         self.batch_concurrency = cfg.signal_pii_batch
         self.ner_model = cfg.signal_pii_ner_model
@@ -118,14 +115,15 @@ class SafetyWorker(SpecWorker):
             self._cache.move_to_end(h)
             while len(self._cache) > self.cache_max:
                 self._cache.popitem(last=False)       # drop LRU
-
-    # ---- batch hook: pre-fill the cache for an entire batch in ONE call ----
-    def process_batch(self, spans: list) -> list:
-        # 1. Collect texts that aren't already cached, deduped across the whole batch.
-        to_analyze: dict[str, str] = {}                # hash -> text
-        for span in spans:
-            if span.get("span_type") not in self.span_types:
-                continue
+    
+    # ------------------------------------------------------------------
+    # _prefill_pii_cache: the safety-specific expensive step.
+    # Runs one concurrent analyze_batch across all unique input + output
+    # texts from kept spans that aren't already in the content cache.
+    # ------------------------------------------------------------------
+    def _prefill_pii_cache(self, kept: list) -> None:
+        to_analyze: dict[str, str] = {}
+        for span in kept:
             md = parse_meta(span.get("metadata"))
             for text in (md.get("input"), md.get("output")):
                 if not text:
@@ -134,18 +132,42 @@ class SafetyWorker(SpecWorker):
                 if self._cache_get(h) is None and h not in to_analyze:
                     to_analyze[h] = text
 
-        # 2. One concurrent call covers everything we don't already have.
-        if to_analyze:
-            hashes = list(to_analyze.keys())
-            texts = [to_analyze[h] for h in hashes]
-            log.info("[safety] analyze_batch: %d unique texts (concurrency=%d)",
-                     len(texts), self.batch_concurrency)
-            results = self.pii_engine.analyze_batch(texts, batch_size=self.batch_concurrency)
-            for h, r in zip(hashes, results):
-                self._cache_put(h, r)
+        if not to_analyze:
+            return
 
-        # 3. Now defer to the standard per-span engine; build_context reads the cache.
-        return super().process_batch(spans)
+        hashes = list(to_analyze.keys())
+        texts = [to_analyze[h] for h in hashes]
+        log.info(
+            "[safety] analyze_batch: %d unique texts (concurrency=%d)",
+            len(texts), self.batch_concurrency,
+        )
+        results = self.pii_engine.analyze_batch(texts, batch_size=self.batch_concurrency)
+        for h, r in zip(hashes, results):
+            self._cache_put(h, r)
+    
+    # ------------------------------------------------------------------
+    # process_batch: gate -> prefill -> delegate to shared engine
+    # ------------------------------------------------------------------
+    def process_batch(self, spans: list) -> list:
+        original_count = len(spans)
+        kept = self.filter_spans_by_gate(spans)
+        skipped_at_gate = original_count - len(kept)
+
+        if skipped_at_gate:
+            log.info(
+                "[safety] %d/%d spans skipped at gate before PII analysis",
+                skipped_at_gate, original_count,
+            )
+        if not kept:
+            log.info("[safety] no spans passed the gate, skipping PII analysis")
+            return []
+        
+        # Safety-specific: pre-fill the PII cache for kept spans (one batched call)
+        self._prefill_pii_cache(kept)
+
+        # Hand off to the shared engine — runs compute() per kept span (which
+        # applies Stage-2 spec-level gating) and emits the per-batch summary.
+        return self._process_kept(original_count, kept, skipped_at_gate)
 
     # ---- build a per-span context from the cached input/output results ----
     def build_context(self, span: dict) -> dict:

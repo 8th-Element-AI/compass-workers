@@ -67,3 +67,8 @@ class Config(BaseSettings):
       default=20000,
       alias="SIGNAL_PII_CACHE_MAX"
     )
+
+    signal_toggle_ttl: float = Field(
+      default=300,
+      alias="SIGNAL_TOGGLE_TTL"
+    )

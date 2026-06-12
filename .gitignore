@@ -18,9 +18,9 @@ venv/
 env/
 ENV/
 
-# ---- Worker runtime state (per-lens watermarks — machine-local, not source) ----
+# ---- Worker runtime state (per-lens checkpoints — machine-local, not source) ----
 state/
-*.watermark
+*.checkpoint
 var/lib/signal-workers/
 
 # ---- Generated / large telemetry data (regenerated; never commit) ----

@@ -42,7 +42,7 @@ signal-workers/
 ```
 
 A lens is tiny: it declares its `specs` and a `build_context(span)`; the base
-class does batching, the watermark, writes, and restart-safe checkpointing.
+class does batching, the checkpoint, writes, and restart-safe checkpointing.
 
 ---
 
@@ -89,7 +89,7 @@ All configuration is environment-driven with local-friendly defaults
 | `PG_DSN` | `postgresql://postgres@localhost:5432/signal` | cost + later | Postgres DSN for pricing/config |
 | `WORKER_BATCH` | `5000` | all | spans fetched per batch |
 | `WORKER_POLL_SEC` | `2.0` | all | sleep between polls (continuous mode) |
-| `WORKER_STATE_DIR` | `/var/lib/signal-workers` | all | where watermark files are stored |
+| `WORKER_STATE_DIR` | `/var/lib/signal-workers` | all | where checkpoint files are stored |
 
 **On Windows/PowerShell**, set the state dir somewhere writable, e.g.:
 
@@ -119,25 +119,25 @@ python run_worker.py cost --once          # Cost lens (reads prices from Postgre
 ```
 
 Each command starts **one** worker for the named lens. The worker pulls spans
-with `recorded_at > watermark`, computes metrics, inserts into
-`signal_derived_metrics`, and advances its watermark.
+with `recorded_at > checkpoint`, computes metrics, inserts into
+`signal_derived_metrics`, and advances its checkpoint.
 
-**Each lens has its own watermark**, so they run fully independently:
+**Each lens has its own checkpoint**, so they run fully independently:
 
 ```
-state/performance.watermark
-state/cost.watermark
+state/performance.checkpoint
+state/cost.checkpoint
 ```
 
-On first run a lens has no watermark, so it **backfills the entire span history**
+On first run a lens has no checkpoint, so it **backfills the entire span history**
 from the beginning — exactly once, independently per lens.
 
 ### Re-running / resetting a lens
 
-Delete that lens's watermark to make it reprocess from scratch:
+Delete that lens's checkpoint to make it reprocess from scratch:
 
 ```powershell
-Remove-Item .\state\cost.watermark -ErrorAction SilentlyContinue
+Remove-Item .\state\cost.checkpoint -ErrorAction SilentlyContinue
 python run_worker.py cost --once
 ```
 
@@ -246,7 +246,7 @@ GROUP BY solution_id;
 | Cost worker slow / hammering Postgres | stale build | ensure `pricing.py` serves from cache + Cost declares `span_types` |
 | Duplicate/inflated numbers after re-run | reprocessed spans appended again | truncate derived + aggregated before a full re-run |
 | `psycopg` import error on Cost | dependency missing | `pip install "psycopg[binary]"` |
-| Watermark won't advance | spans share identical `recorded_at` at the batch edge | increase `WORKER_BATCH` so the batch clears the tie |
+| Checkpoint won't advance | spans share identical `recorded_at` at the batch edge | increase `WORKER_BATCH` so the batch clears the tie |
 
 ---
 

@@ -4,9 +4,9 @@ A lens worker only has to declare which metrics it owns and implement
 `compute(span) -> list[MetricRow]`. The base class handles:
 
   * connecting to ClickHouse (lazy — only when actually used),
-  * pulling unprocessed spans in batches (poll mode) by a `recorded_at` watermark,
+  * pulling unprocessed spans in batches (poll mode) by a `recorded_at` checkpoint,
   * writing computed metric rows into `signal_derived_metrics`,
-  * persisting the watermark so restarts resume cleanly,
+  * persisting the checkpoint so restarts resume cleanly,
   * a `run_csv()` path so the exact same compute logic can be validated
     offline against an exported spans CSV (no ClickHouse needed),
   * a `on_message()` hook shaped for a future NATS consumer,
@@ -19,7 +19,6 @@ The 25 raw columns and 18 derived columns mirror the loaded schema exactly.
 """
 from __future__ import annotations
 import os
-import csv
 import json
 import threading
 import logging
@@ -116,10 +115,8 @@ class BaseWorker:
     # ---- optional batch hook (overridden by SpecWorker; lenses can override again
     # to do expensive model inference across many spans in one call) ----
     def process_batch(self, spans: list) -> list:
-        rows = []
-        for span in spans:
-            rows.extend(self.compute(span))
-        return rows
+        """Default batch processor: compute each span independently and concat results."""
+        raise NotImplementedError
 
     # ---- ClickHouse (lazy import so offline/CSV use needs no driver) ----
     def ch(self):
@@ -135,23 +132,23 @@ class BaseWorker:
     # ---- checkpoint (file-based; simple and restart-safe) ----
     def _state_path(self):
         os.makedirs(self.cfg.state_dir, exist_ok=True)
-        return os.path.join(self.cfg.state_dir, f"{self.lens}.watermark")
+        return os.path.join(self.cfg.state_dir, f"{self.lens}.checkpoint")
 
-    def load_watermark(self) -> str:
+    def load_checkpoint(self) -> str:
         try:
             with open(self._state_path()) as f:
                 return f.read().strip()
         except FileNotFoundError:
             return "1970-01-01 00:00:00.000"
 
-    def save_watermark(self, wm: str):
+    def save_checkpoint(self, wm: str):
         path = self._state_path()
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             f.write(wm)
         os.replace(tmp, path)
 
-    # ---- fetch a batch of spans newer than the watermark ----
+    # ---- fetch a batch of spans newer than the checkpoint ----
     def fetch_batch(self, since: str, limit: int):
         type_filter = ""
         if self.span_types:
@@ -181,8 +178,9 @@ class BaseWorker:
     def run_poll(self, once: bool = False):
         log.info("[%s] starting poll loop (batch=%d)", self.lens, self.cfg.batch_size)
         while not self._stop_event.is_set():
-            wm = self.load_watermark()
+            wm = self.load_checkpoint()
             spans = self.fetch_batch(wm, self.cfg.batch_size)
+            print(f"Fetched {len(spans)} spans newer than {wm}\n")
             if spans:
                 rows = self.process_batch(spans)
                 newest = wm
@@ -191,7 +189,7 @@ class BaseWorker:
                     if rec > newest:
                         newest = rec
                 self.write(rows)
-                self.save_watermark(newest)
+                self.save_checkpoint(newest)
                 log.info("[%s] %d spans -> %d metrics (wm=%s)", self.lens, len(spans), len(rows), newest)
             if once:
                 break
@@ -199,24 +197,3 @@ class BaseWorker:
             if not spans:
                 self._stop_event.wait(self.cfg.poll_sec)
         log.info("[%s] poll loop exited", self.lens)
-
-    # ---- NATS-shaped hook for later (subscribe to span events, compute, write) ----
-    def on_message(self, span: dict):
-        rows = self.process_batch([span])
-        self.write(rows)
-        return rows
-
-    # ---- offline validation: run the SAME process_batch over an exported spans CSV ----
-    def run_csv(self, spans_csv: str):
-        spans = []
-        with open(spans_csv, newline="") as f:
-            for span in csv.DictReader(f):
-                # normalise CSV null token
-                for k, v in list(span.items()):
-                    if v == "\\N":
-                        span[k] = None
-                spans.append(span)
-        # Apply the span_type filter in offline mode too (live mode does it in SQL).
-        if self.span_types:
-            spans = [s for s in spans if s.get("span_type") in self.span_types]
-        return self.process_batch(spans)
