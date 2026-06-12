@@ -83,14 +83,3 @@ class PricingCache:
     def rates(self, component_id: str) -> dict:
         rec = self.get(component_id)
         return (rec or {}).get("pricing", {}) or {}
-
-
-def default_pricing() -> dict:
-    """The known seed rates — used for offline (--csv) cost runs without Postgres."""
-    return {
-        "model_gpt4o":     {"component_type": "model", "pricing": {"input_per_1k": 0.005, "output_per_1k": 0.015, "cached_input_per_1k": 0.0025}},
-        "model_claude":    {"component_type": "model", "pricing": {"input_per_1k": 0.003, "output_per_1k": 0.015, "cached_input_per_1k": 0.0003}},
-        "model_embed":     {"component_type": "model", "pricing": {"input_per_1k": 0.00002, "output_per_1k": 0.0}},
-        "tool_websearch":  {"component_type": "tool", "pricing": {"per_call": 0.005}},
-        "kb_product_docs": {"component_type": "knowledgebase", "pricing": {"per_query": 0.0001}},
-    }

@@ -6,8 +6,9 @@
 import sys
 from signal_worker.lenses.performance import PerformanceWorker
 from signal_worker.lenses.cost import CostWorker
+from signal_worker.lenses.safety import SafetyWorker
 
-LENSES = {"performance": PerformanceWorker, "cost": CostWorker}
+LENSES = {"performance": PerformanceWorker, "cost": CostWorker, "safety": SafetyWorker}  # safety imports the PII module, so show_specs doesn't support it yet
 
 
 def main():
