@@ -13,8 +13,8 @@ from .normalize import normalize
 
 
 class ToxicityClassifier:
-    def __init__(self, config_path: str | None = None) -> None:
-        self.config = load_config(config_path)
+    def __init__(self) -> None:
+        self.config = load_config()
         runtime = self.config.get("runtime", {})
         self.device = resolve_device(runtime.get("device", "cuda"))
         self.max_length = int(runtime.get("max_length", 128))

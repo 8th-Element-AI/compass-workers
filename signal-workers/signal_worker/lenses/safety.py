@@ -29,7 +29,7 @@ log = logging.getLogger("signal.worker.safety")
 LENS = "safety"
 
 PII_METRICS       = {"pii_count", "pii_detected", "pii_distinct_types"}
-TOXICITY_METRICS  = {"toxicity_detected"}
+TOXICITY_METRICS  = {"toxicity_score"}
 INJECTION_METRICS = {"prompt_injection_detected", "jailbreak_attempt"}# future
 
 def _spec(metric, applies, pattern, inputs, unit, window="1h",
@@ -102,7 +102,6 @@ class SafetyWorker(SpecWorker):
         # Safety-specific config + state for the PII cache and engine.
         self.pii_batch_concurrency = cfg.signal_pii_batch
         self.ner_model = cfg.signal_pii_ner_model
-        self.toxicity_config = cfg.signal_toxicity_config
 
         # Lazy analyzers
         self._pii_engine = None
@@ -144,7 +143,7 @@ class SafetyWorker(SpecWorker):
         if self._toxicity_classifier is None:
             from toxicity_observability import ToxicityClassifier
             log.info("[safety] loading ToxicityClassifier (config=%s)", self.toxicity_config)
-            self._toxicity_classifier = ToxicityClassifier(self.toxicity_config)
+            self._toxicity_classifier = ToxicityClassifier()
         return self._toxicity_classifier
 
     # ---- analyzer adapters (called by _prefill_cache) ----

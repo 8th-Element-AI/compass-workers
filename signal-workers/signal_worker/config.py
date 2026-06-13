@@ -73,13 +73,7 @@ class Config(BaseSettings):
       alias="SIGNAL_PII_CACHE_MAX"
     )
 
-    signal_toxicity_config: str = Field(
-      default="",
-      alias="SIGNAL_TOXICITY_CONFIG"
-    )
-
     signal_toxicity_cache_max: int = Field(
       default=20000,
       alias="SIGNAL_TOXICITY_CACHE_MAX"
     )
-
