@@ -397,7 +397,7 @@ Relevant Signal env vars (full list in `signal-workers/README.md`):
 | `SIGNAL_TOXICITY_MODELS_ROOT` | `/opt/models` (in image) | Base path for the four artifacts |
 | `SIGNAL_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `SIGNAL_TOXICITY_BATCH_SIZE` | `32` | Per-batch texts for the worker-side batched inference |
-| `SIGNAL_TOXICITY_ATTACK_ROUTE` | `0.05` | (See §7) |
+| `SIGNAL_TOXICITY_ATTACK_ROUTE` | `0.05` | (See S7) |
 | `SIGNAL_TOXICITY_MODERATION_ROUTE` | `0.05` | |
 | `SIGNAL_TOXICITY_FAST_ALLOW` | `0.02` | |
 | `SIGNAL_TOXICITY_FASTTEXT_DIRECT` | `0.97` | |

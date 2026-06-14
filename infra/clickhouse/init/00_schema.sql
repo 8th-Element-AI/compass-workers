@@ -10,7 +10,7 @@
 --   * single base-grain MV (1 MINUTE) — coarser windows via read-time merge
 --   * io_* columns ZSTD-compressed
 --
--- BASE GRAIN: 1 MINUTE (see §MV). Change to 30 SECOND only if you need
+-- BASE GRAIN: 1 MINUTE (see SMV). Change to 30 SECOND only if you need
 -- sub-minute live tailing. The mock CSV data is grain-independent.
 -- ============================================================================
 

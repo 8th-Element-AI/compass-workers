@@ -50,7 +50,7 @@ def _run_all(cfg: Config, once: bool) -> int:
     """Run every lens concurrently in this process — one thread per lens.
 
     Lifecycle is coupled (one crash takes them all down). For production-grade
-    isolation, run separate processes — see ARCHITECTURE.md §8.
+    isolation, run separate processes — see ARCHITECTURE.md S8.
     """
     workers = [build_worker(lens, cfg) for lens in LENSES]
     threads = [

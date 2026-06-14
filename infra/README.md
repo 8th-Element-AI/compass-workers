@@ -126,7 +126,7 @@ after the stack is up via `load_clickhouse.ps1`.
 If you add new init files to either dir after the first boot, they will NOT run
 automatically. Either:
 - `docker compose down -v` and `up -d` again (re-runs everything), or
-- Apply manually via `psql` / `clickhouse-client` (see §10).
+- Apply manually via `psql` / `clickhouse-client` (see S10).
 
 ---
 
@@ -206,7 +206,7 @@ signal_aggregated_metrics (AggregatingMergeTree)       — 1-min rollup buckets
 The `non_replicated_deduplication_window = 1000` setting on `signal_derived_metrics`
 is what makes worker writes idempotent: a re-attempted insert with a previously-
 seen `insert_deduplication_token` is dropped silently, and the materialized view
-does not fire. See `signal-workers/README.md` § "Data correctness guarantees".
+does not fire. See `signal-workers/README.md` S "Data correctness guarantees".
 
 To verify the setting is present:
 
@@ -375,7 +375,7 @@ env:
     valueFrom: { secretKeyRef: { name: signal-worker-secrets, key: PG_DSN } }
 ```
 
-See `signal-workers/README.md` § "Production deployment".
+See `signal-workers/README.md` S "Production deployment".
 
 ---
 
@@ -406,7 +406,7 @@ docker exec -i signal-clickhouse clickhouse-client --database signal < clickhous
 ### Drop and recreate one table
 
 ```sql
--- ClickHouse: see infra/clickhouse/init/00_schema.sql §0b for a copy-pasteable
+-- ClickHouse: see infra/clickhouse/init/00_schema.sql S0b for a copy-pasteable
 -- "DROP THESE" block. The MV must be dropped before the tables it reads/writes.
 DROP VIEW  IF EXISTS mv_agg_base;
 DROP TABLE IF EXISTS signal_aggregated_metrics;
@@ -436,10 +436,10 @@ This compose stack is **for development**. For production:
   deploying any workers. It's idempotent (`CREATE TABLE IF NOT EXISTS`).
 - **Verify `non_replicated_deduplication_window` is set on production
   ClickHouse**. The init script includes it, but if you provisioned the table
-  before that setting landed, ALTER it on (see § 6.2).
+  before that setting landed, ALTER it on (see S 6.2).
 - **Materialized view consistency**: if your prod CH cluster goes through a
   reshard or table-rebuild, the MV must be recreated and old data backfilled
-  (see § 7). Plan for an MV outage during such operations.
+  (see S 7). Plan for an MV outage during such operations.
 - **Backups**: Postgres = standard `pg_dump`. ClickHouse = `BACKUP TABLE ... TO
   Disk('backup_disk', '...')`, or use the cloud provider's snapshot story.
 - **Retention**: tables have explicit `TTL` clauses (90 days for raw + derived,
@@ -454,12 +454,12 @@ This compose stack is **for development**. For production:
 |---|---|---|
 | `docker compose up -d` exits but `ps` shows postgres restarting | Init script syntax error | `docker compose logs postgres` — find the SQL line; init runs in alphabetical order, so 00 must succeed before 01 runs |
 | Workers can't connect: `Connection refused` to `localhost:8123` | CH container not up yet, or wrong port in `.env` | `docker compose ps`, check healthcheck; verify `CH_PORT=8123` matches the host port mapping |
-| `verify.ps1` shows aggregated = 0 after data load | Either MV didn't exist when derived was loaded, OR you're querying before MV catches up | Re-run the backfill INSERT from §7; the MV is async on huge inserts but converges within seconds |
+| `verify.ps1` shows aggregated = 0 after data load | Either MV didn't exist when derived was loaded, OR you're querying before MV catches up | Re-run the backfill INSERT from S7; the MV is async on huge inserts but converges within seconds |
 | ClickHouse out of memory on a big load | CH default memory limit | Pass `--max_memory_usage_for_user=8000000000` to clickhouse-client, or split the CSV |
 | Init scripts not re-running after edit | Volumes persist between `up`/`down`; init only runs on a clean volume | `docker compose down -v && docker compose up -d` (DESTRUCTIVE), or apply the edited file manually via `docker exec` |
 | `permission denied` on `init/` files inside container | File mode issue on the bind mount | `chmod 644 postgres/init/*.sql clickhouse/init/*.sql` and `up -d` again |
 | `signal-postgres` container name conflict | Previous deployment with same name | `docker rm -f signal-postgres signal-clickhouse` then `up -d` |
-| `SHOW CREATE TABLE` doesn't show the dedup setting | ALTER never applied on this deployment | See § 6.2 |
+| `SHOW CREATE TABLE` doesn't show the dedup setting | ALTER never applied on this deployment | See S 6.2 |
 | Postgres `role "signal" does not exist` from workers | `PG_DSN` user doesn't match the seeded user (which is `postgres`) | Either change DSN to `postgresql://postgres:postgres@host:5432/signal`, or `CREATE USER signal WITH PASSWORD '...'` and grant privileges |
 
 ---

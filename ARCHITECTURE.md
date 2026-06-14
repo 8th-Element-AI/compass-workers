@@ -54,7 +54,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
   write to derived metric is 2–5 seconds.
 - **Exactly-once semantics across both stores.** ClickHouse and Postgres don't
   share a transactional boundary; we settle for **effective once-per-row in
-  ClickHouse** via insert deduplication. See [§9](#9-data-correctness-guarantees).
+  ClickHouse** via insert deduplication. See [S9](#9-data-correctness-guarantees).
 - **A guardrail / blocking layer.** The Safety lens emits *observability*
   signals (PII counts, toxicity labels). It does not block requests. The
   application layer decides what to do with the signals.
@@ -215,7 +215,7 @@ EAV (entity-attribute-value): one row per metric per span. 18 columns:
 #### The dedup window
 
 `non_replicated_deduplication_window = 1000` is what makes the worker
-restart-safe (see [§9.2](#92-idempotency-via-dedup-tokens)). ClickHouse
+restart-safe (see [S9.2](#92-idempotency-via-dedup-tokens)). ClickHouse
 remembers the last 1000 block hashes / tokens inserted into this table and
 silently drops any duplicate. **Critically: the MV does not fire on a
 deduplicated insert.** This is what protects the aggregated table from double-
@@ -300,7 +300,7 @@ A common instinct is "switch derived to `ReplacingMergeTree` keyed on
 
 The right fix is to prevent the duplicate insert in the first place, which is
 what `insert_deduplication_token` does (and why the MV correctly does not fire
-on a dropped insert). See [§9.2](#92-idempotency-via-dedup-tokens).
+on a dropped insert). See [S9.2](#92-idempotency-via-dedup-tokens).
 
 ---
 
@@ -526,7 +526,7 @@ will register its judge-call steps the same way.
 Every derived row carries the full entity path. The `scope` column says which
 level the metric is *about*.
 
-Per [§3](#3-storage-architecture--two-stores-one-shape), `path_cols(span, scope)`
+Per [S3](#3-storage-architecture--two-stores-one-shape), `path_cols(span, scope)`
 blanks ids deeper than the scope. `scopes_for(span)` returns the scope(s) the
 span emits at — usually one. The exception: a root `solution` span also mirrors
 to `endpoint` so endpoint-scoped dashboards have data.
@@ -581,7 +581,7 @@ class PostgresCheckpointStore:
 Connection is opened lazily, autocommit, held for the worker's lifetime. Each
 save is one UPSERT. Save failures propagate out — the run loop dies, K8s
 restarts the pod, and `load()` returns the last successfully-saved watermark.
-The dedup token then prevents double-write on re-fetch (see §9.2).
+The dedup token then prevents double-write on re-fetch (see S9.2).
 
 ---
 
@@ -811,7 +811,7 @@ Per Deployment:
 - `resources.requests/limits`:
   - Performance/Cost: ~250m CPU, ~512Mi RAM each
   - Safety: ~1 CPU, ~4Gi RAM (more RAM for model weights)
-- `replicas: 1` (see [§11.4](#114-horizontal-scaling-safety))
+- `replicas: 1` (see [S11.4](#114-horizontal-scaling-safety))
 
 The Service is purely for Prometheus discovery; workers don't serve traffic.
 
@@ -877,7 +877,7 @@ This means:
 
 The 1000-token window is sized for normal restart scenarios (where the window
 between failure and recovery is seconds, not days). For deliberate large
-rewinds, use the manual cleanup pattern in `infra/README.md` § "Reset and re-init".
+rewinds, use the manual cleanup pattern in `infra/README.md` S "Reset and re-init".
 
 ### 9.3 Per-lens isolation
 
@@ -898,7 +898,7 @@ back without touching the other lenses.
 | Exactly-once across CH and PG | ❌ — no shared transaction. Token gives effective once-per-row in CH; PG watermark can technically lag. |
 | Strict ordering within a lens | ❌ — each batch is processed atomically, but inter-batch ordering depends on `ORDER BY recorded_at LIMIT N` and the dedup window |
 | Span-boundary ties | ❌ — `recorded_at > wm LIMIT N` can skip rows that share the boundary timestamp if a tie spans the batch edge. Mitigated by `WORKER_BATCH = 5000`; a robust fix is `(recorded_at, span_id)` cursor pagination, deferred |
-| Multi-pod fan-out for same lens | ❌ — both pods fetch the same spans, wasting compute; the dedup token prevents data corruption but not the waste. Need partitioned consumption (§11.4) |
+| Multi-pod fan-out for same lens | ❌ — both pods fetch the same spans, wasting compute; the dedup token prevents data corruption but not the waste. Need partitioned consumption (S11.4) |
 
 ---
 
@@ -941,7 +941,7 @@ Five questions an operator needs to answer:
 
 `checkpoint_lag_seconds` is the metric for HPAs to scale on — when Safety falls
 behind by more than ~5 minutes, the HPA spins more replicas. (Multi-replica
-Safety still needs partitioned consumption first; see §11.4. The metric is the
+Safety still needs partitioned consumption first; see S11.4. The metric is the
 right input regardless.)
 
 ### 10.4 Why not push-based metrics
@@ -978,7 +978,7 @@ backfill.
 
 ### 11.2 Why dedup tokens, not `ReplacingMergeTree`
 
-Covered in [§4.5](#45-why-no-replacingmergetree-on-derived) and [§9.2](#92-idempotency-via-dedup-tokens).
+Covered in [S4.5](#45-why-no-replacingmergetree-on-derived) and [S9.2](#92-idempotency-via-dedup-tokens).
 
 Short version: ReplacingMergeTree deduplicates at merge time, after the MV
 has already fired and double-counted. Dedup tokens prevent the duplicate
@@ -1021,7 +1021,7 @@ use. Three lens images sharing a `:base` is the smallest-blast-radius shape.
 
 ### 11.6 Bake models in vs init-container + PVC
 
-Covered in [§8.2](#82-why-bake-models-into-the-image-not-init-container--pvc).
+Covered in [S8.2](#82-why-bake-models-into-the-image-not-init-container--pvc).
 
 ### 11.7 No streaming ingestion yet
 
@@ -1034,7 +1034,7 @@ end). Until product asks for it, poll is simpler.
 
 Quality (`relevance`, `faithfulness`, `coherence`, `context_relevance`, …)
 needs a pluggable judge — typically an LLM call. The PrefillStep abstraction
-(§6.5) is built for it: Quality will register a step that batches one judge
+(S6.5) is built for it: Quality will register a step that batches one judge
 call across many spans. The interface for the judge is intentionally not
 designed yet — we want to see one production deployment before fixing the
 abstraction.

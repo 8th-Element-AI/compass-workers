@@ -49,8 +49,6 @@ signal-workers/
 ├── Dockerfile.cost          builds signal-worker:cost
 ├── Dockerfile.safety        builds signal-worker:safety (extends :base with ML stack)
 ├── .env.example             template for local dev (host mode)
-├── README.md                (this file)
-├── ARCHITECTURE.md          technical design — engine, scoping, tradeoffs
 └── signal_worker/
     ├── config.py            env-driven Pydantic Settings (CH/PG/run-loop/toxicity/PII)
     ├── base.py              engine: fetch → compute → write → checkpoint
@@ -205,7 +203,7 @@ HF_TOKEN=hf_...
 SIGNAL_TOXICITY_MODELS_ROOT=E:/8thelement/Signal/toxicity/models
 ```
 
-See [§7 Configuration reference](#7-configuration-reference) for the full list.
+See [S7 Configuration reference](#7-configuration-reference) for the full list.
 
 ### 4.3 Pre-download Safety models (one-time, if running safety on host)
 
