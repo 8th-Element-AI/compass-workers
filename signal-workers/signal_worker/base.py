@@ -6,7 +6,8 @@ A lens worker only has to declare which metrics it owns and implement
   * connecting to ClickHouse (lazy — only when actually used),
   * pulling unprocessed spans in batches (poll mode) by a `recorded_at` checkpoint,
   * writing computed metric rows into `signal_derived_metrics`,
-  * persisting the checkpoint so restarts resume cleanly,
+  * persisting the checkpoint to Postgres (worker_checkpoints table) so
+    restarts and pod replacements resume cleanly,
   * a `process_batch(spans)` hook for lenses with expensive per-text inference
     (Safety/Quality) — they override it to batch one model call across many
     spans; cheap lenses (Performance, Cost) inherit the default loop,
@@ -52,6 +53,7 @@ def to_dt(x):
 
 
 def parse_meta(raw):
+    """Parse a metadata blob (str | dict | empty marker) into a dict; never returns None."""
     if not raw or raw in ("{}", "\\N"):
         return {}
     if isinstance(raw, dict):
@@ -88,6 +90,15 @@ def path_cols(span: dict, scope: str) -> dict:
 
 
 class BaseWorker:
+    """Engine-agnostic worker shell. Subclasses (typically via SpecWorker) declare
+    their metrics and implement compute(span) -> list[row]; this class handles
+    the loop, the DB connections, the checkpoint, and graceful shutdown.
+
+    Class attrs:
+        lens: Short lens name ('performance', 'cost', 'safety', ...).
+        span_types: Optional list of span_type values; when set, the filter is
+            pushed into fetch_batch's SQL (None = read everything).
+    """
     lens = "base"
     # Optional: restrict this lens to specific span types. When set, the filter is
     # pushed into the fetch query (uses the primary-key index on span_type) so the
@@ -95,6 +106,7 @@ class BaseWorker:
     span_types = None
 
     def __init__(self, cfg):
+        """Hold config and prepare lazy CH handle + shutdown event."""
         self.cfg = cfg
         self._ch = None
         # Shutdown signal — set by stop() to terminate run_poll cleanly between batches.
@@ -102,6 +114,7 @@ class BaseWorker:
 
     # ---- which metrics this lens is responsible for (for logging/guardrails) ----
     def owns(self) -> set:
+        """Set of metric names this lens emits. Subclasses must override."""
         raise NotImplementedError
 
     # ---- the only thing a lens must implement ----
@@ -112,11 +125,20 @@ class BaseWorker:
     # ---- optional batch hook (overridden by SpecWorker; lenses can override again
     # to do expensive model inference across many spans in one call) ----
     def process_batch(self, spans: list) -> list:
-        """Default batch processor: compute each span independently and concat results."""
+        """Process a list of spans into derived rows.
+
+        Default base impl defers to subclasses. SpecWorker provides the standard
+        gate-filtered loop; lenses with batched ML inference (e.g. Safety)
+        override again to share a single model call across many spans.
+
+        Args:
+            spans: Raw span dicts.
+        """
         raise NotImplementedError
 
     # ---- ClickHouse (lazy import so offline/CSV use needs no driver) ----
     def ch(self):
+        """Lazy ClickHouse client. Opened on first call; offline/CSV paths never call it."""
         if self._ch is None:
             import clickhouse_connect
             self._ch = clickhouse_connect.get_client(
@@ -128,21 +150,38 @@ class BaseWorker:
 
     # ---- checkpoint (file-based; simple and restart-safe) ----
     def _checkpoint_store(self):
-        # Lazy — first call opens the PG connection. Cached on `self` for
-        # the worker's lifetime.
+        """Lazy Postgres checkpoint store. Cached on self for the worker's lifetime."""
         if not hasattr(self, "_ckpt_store"):
             from .checkpoint import PostgresCheckpointStore
             self._ckpt_store = PostgresCheckpointStore(self.cfg.pg_dsn)
         return self._ckpt_store
 
     def load_checkpoint(self):
+        """Return this lens's saved high-watermark from PG, or the epoch default if none.
+
+        Returns:
+            A 'YYYY-MM-DD HH:MM:SS.mmm' string usable as fetch_batch(since=...).
+        """
         return self._checkpoint_store().load(self.lens)
 
     def save_checkpoint(self, cp):
+        """Atomically UPSERT this lens's high-watermark into PG.
+
+        Args:
+            wm: New high-watermark string ('YYYY-MM-DD HH:MM:SS.mmm').
+        """
         self._checkpoint_store().save(self.lens, cp)
 
     # ---- fetch a batch of spans newer than the checkpoint ----
     def fetch_batch(self, since: str, limit: int):
+        """Fetch up to `limit` spans with recorded_at > `since`, ordered by recorded_at.
+
+        If `self.span_types` is set, the filter is pushed into the SQL.
+
+        Args:
+            since: High-watermark string from load_checkpoint().
+            limit: Maximum number of spans to return.
+        """
         type_filter = ""
         if self.span_types:
             lits = ", ".join("'" + t + "'" for t in self.span_types)
@@ -157,6 +196,14 @@ class BaseWorker:
 
     # ---- write computed rows ----
     def write(self, rows: list, dedup_token: str | None = None):
+        """Insert derived-metric rows into ClickHouse.
+
+        Args:
+            rows: Derived-row dicts keyed by DER_COLS. Empty list = no-op.
+            dedup_token: Deterministic per-batch token. When supplied, CH drops
+                duplicate inserts silently and the MV does not fire on them —
+                this is what makes restart safe (see run_poll).
+        """
         if not rows:
             return
         data = [[r.get(c) for c in DER_COLS] for r in rows]
@@ -172,11 +219,21 @@ class BaseWorker:
         
     # ---- shutdown signal (used by main process on Ctrl+C / SIGTERM) ----
     def stop(self):
+        """Request graceful shutdown. run_poll exits at the next batch boundary."""
         log.info("[%s] stop requested", self.lens)
         self._stop_event.set()
 
     # ---- poll loop (production-ish) ----
     def run_poll(self, once: bool = False):
+        """Production poll loop: fetch -> process -> write -> checkpoint, on repeat.
+
+        Each batch is restart-safe via a deterministic dedup token passed to
+        write(). Crash between write and save_checkpoint just means the same
+        batch is re-attempted on next start and ClickHouse drops it.
+
+        Args:
+            once: If True, process at most one non-empty batch and return.
+        """
         log.info("[%s] starting poll loop (batch=%d)", self.lens, self.cfg.batch_size)
         while not self._stop_event.is_set():
             wm = self.load_checkpoint()

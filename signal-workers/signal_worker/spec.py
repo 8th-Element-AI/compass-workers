@@ -24,6 +24,10 @@ log = logging.getLogger("signal.worker")
 
 @dataclass
 class MetricSpec:
+    """Pure declaration of one metric — name, what it applies to, how it's
+    computed, and rollup/threshold hints. No logic in the spec itself; the
+    `applies` and `pattern` callables live in predicates.py / patterns.py.
+    """
     metric: str
     lens: str
     applies: Callable                       # (span) -> bool
@@ -52,21 +56,34 @@ class PrefillStep:
                                             # texts -> results (None = skip cache)
 
 class SpecWorker(BaseWorker):
+    """Engine that drives spec-declared metrics across spans.
+
+    Per span: build_context() once, then walk self.specs, run applicable ones
+    against the toggle gate, emit one derived row per (scope, metric) that
+    survives the gate. A lens subclass needs only `lens`, `specs`, and
+    `build_context()`.
+    """
     specs: list = []
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
     def __init__(self, cfg, toggle_cache: Optional[ToggleCache] = None):
+        """Bind config and toggle cache.
+
+        Args:
+            cfg: Config from signal_worker.config.
+            toggle_cache: Optional injected cache. If None, one is built lazily
+                from cfg.pg_dsn. The offline --csv path injects a disabled cache
+                so every span passes the gate.
+        """
         super().__init__(cfg)
-        # Allow caller injection (used by offline --csv path to inject a
-        # disabled cache so every span flows through unmodified).
         self._toggle_cache = toggle_cache
-        # Per-batch skip stats — reset at the start of each process_batch
         self._batch_skipped_at_spec: Counter = Counter()
 
     @property
     def toggle_cache(self) -> ToggleCache:
+        """Lazy ToggleCache (built from cfg on first access)."""
         if self._toggle_cache is None:
             self._toggle_cache = ToggleCache(
                 category=self.lens,
@@ -77,16 +94,28 @@ class SpecWorker(BaseWorker):
 
     # ---- a lens provides this: parse/derive everything the patterns need, ONCE ----
     def build_context(self, span: dict) -> dict:
+        """Lens-specific: parse the span once into a dict the patterns read.
+
+        Subclasses must override. Whatever's expensive (metadata parse, latency
+        math, pricing lookup, model inference cache lookup) goes here so each
+        spec just reads off the result.
+        """
         raise NotImplementedError
 
     # ---- which scope(s) a span emits at; root solution spans also mirror to endpoint ----
     def scopes_for(self, span: dict):
+        """Return the scope(s) this span emits metrics at.
+
+        Normally just the span's own scope. A root solution span also mirrors
+        to 'endpoint' so endpoint-scoped dashboards have data.
+        """
         level = span.get("scope") or span.get("span_type")
         if level == "solution":
             return ["solution", "endpoint"] if (span.get("endpoint") or "") else ["solution"]
         return [level]
 
     def owns(self) -> set:
+        """Set of metric names this lens emits (from its declared specs)."""
         return {s.metric for s in self.specs}
     
     # ------------------------------------------------------------------
@@ -158,28 +187,29 @@ class SpecWorker(BaseWorker):
                         break
         return result
     
-    # ------------------------------------------------------------------
-    # Generic per-step prefill helper — used by Safety today, Quality later.
-    #
-    # A "step" is a piece of expensive per-text analysis (Presidio scan,
-    # content-safety classification, future LLM-judge call). Steps share
-    # this pipeline:
-    #     1. Sub-filter `kept` to spans whose threshold metrics overlap
-    #        with step.metrics (so a span kept only for a different group's
-    #        threshold doesn't pay this step's CPU).
-    #     2. Extract texts from each needed span via step.extract.
-    #     3. Dedup against step.cache and within the batch.
-    #     4. Call step.analyze on the unique remaining texts.
-    #     5. Cache results by content hash.
-    #
-    # Returns the number of texts actually sent to the analyzer (for logging).
-    # ------------------------------------------------------------------
     @staticmethod
     def _hash(text: str) -> str:
+        """16-hex-char content hash used as the cache key for prefill results."""
         import hashlib
         return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
  
     def _prefill_cache(self, kept: list, step: "PrefillStep") -> int:
+        """Run one expensive batched analysis step and cache results by content hash.
+
+        Pipeline:
+          1. Sub-filter kept to spans whose threshold metrics overlap step.metrics.
+          2. Extract texts via step.extract.
+          3. Dedup against step.cache and within the batch.
+          4. Call step.analyze on the unique remaining texts.
+          5. Cache results by content hash for subsequent batches.
+
+        Args:
+            kept: Spans already past the Stage 1 gate.
+            step: A PrefillStep describing what to extract and analyze.
+
+        Returns:
+            Number of texts actually sent to the analyzer (0 if all cached).
+        """
         needed = self._spans_needing(kept, step.metrics)
         if not needed:
             log.info("[%s] %s: no spans need analysis", self.lens, step.name)
@@ -217,6 +247,10 @@ class SpecWorker(BaseWorker):
     # Row builder — invokes spec.meta_fn for per-row metric_meta
     # ------------------------------------------------------------------
     def _row(self, p: dict, span: dict, spec: MetricSpec, value: float, ctx: dict):
+        """Build one derived-metric row from a (span, spec, value).
+
+        Invokes spec.meta_fn (if set) to attach per-row metric_meta JSON.
+        """
         row = {
             "span_id": span["span_id"],
             "trace_id": span.get("trace_id", "") or "",
@@ -247,6 +281,16 @@ class SpecWorker(BaseWorker):
     # compute() — per-span engine. Stage-2 spec-level gate lives here.
     # ------------------------------------------------------------------
     def compute(self, span: dict) -> list:
+        """Run all applicable per-span specs for one span and return derived rows.
+
+        Two gates are applied:
+          - span_type filter (cheap reject when the lens has span_types set).
+          - Stage 2 toggle gate (per (scope, path, metric)).
+
+        Returns:
+            Zero or more derived-row dicts (one per (scope, metric) that
+            passed both gates and whose pattern returned a non-None value).
+        """
         if self.span_types and span.get("span_type") not in self.span_types:
             return []
         ctx = self.build_context(span)
@@ -273,6 +317,11 @@ class SpecWorker(BaseWorker):
     # process_batch() — applies stage-1 gate, then runs the shared engine
     # ------------------------------------------------------------------
     def process_batch(self, spans: list) -> list:
+        """Default batch path: apply Stage 1 gate, then run compute() per span.
+
+        Args:
+            spans: Raw span dicts.
+        """
         original = len(spans)
         kept = self.filter_spans_by_gate(spans)
         return self._process_kept(original, kept, original - len(kept))
