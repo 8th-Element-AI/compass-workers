@@ -1,0 +1,44 @@
+flowchart TD
+    RAW[("signal_raw_spans<br/>ClickHouse · immutable")]
+    RAW -->|"fetch_batch: recorded_at > watermark<br/>AND span_type IN (retrieval, model_call, ...)"| TMAP
+
+    subgraph LENS["quality.py"]
+        TMAP["build trace_answers map:<br/>trace_id → concat(model_call outputs)<br/>cross-span step, per batch"]
+        JOB["per retrieval span:<br/>job = (query, chunk_texts, same-trace answer)<br/>key = r:hash(query):hash(chunks):hash(answer)"]
+        HIT{"in LRU<br/>cache?"}
+        TMAP --> JOB --> HIT
+    end
+
+    HIT -->|"miss — unique jobs only"| PREP
+    HIT -->|hit| CTX
+
+    subgraph SCORER["⭐ scorers.py"]
+        PREP["score_retrieval — ONE batched call<br/>answer JSON-flattened + sentence-split"]
+        R["context_relevance<br/>MS-MARCO cross-encoder scores<br/>each (query, chunk) pair<br/>sigmoid → 0–1<br/>score = mean across chunks"]
+        U["chunk_utilization<br/>MiniLM embeddings:<br/>chunk is USED if best cosine vs<br/>any answer sentence ≥ 0.5<br/>score = used / total<br/>no answer in batch → no row"]
+        PREP --> R
+        PREP --> U
+    end
+
+    R --> PUT["scores + per-chunk evidence<br/>→ content-hash LRU cache"]
+    U --> PUT
+    PUT --> CTX
+
+    subgraph ENGINE["spec.py"]
+        CTX["build_context:<br/>look up cached scores for this span's job"]
+        SPECS["⭐ 2 MetricSpecs emit via ctx_value()<br/>context_relevance · chunk_utilization<br/>evidence (chunks, rel[], used) → metric_meta"]
+        CTX --> SPECS
+    end
+
+    SPECS -->|"bulk INSERT,<br/>watermark advances"| DER[("signal_derived_metrics")]
+    DER -->|"mv_agg_base fires on INSERT"| AGG[("signal_aggregated_metrics<br/>1-min buckets · agg states")]
+    AGG -->|"avgMerge at read time"| READ["dashboards · KPIs<br/>Postgres thresholds → signals"]
+
+    style SCORER fill:#fff3cd,stroke:#d4a017,stroke-width:3px
+    style SPECS fill:#fff3cd,stroke:#d4a017,stroke-width:2px
+    style R fill:#ffe9a8,stroke:#d4a017
+    style U fill:#ffe9a8,stroke:#d4a017
+    style TMAP fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+    style RAW fill:#e8f0fe,stroke:#4285f4
+    style DER fill:#e8f0fe,stroke:#4285f4
+    style AGG fill:#e8f0fe,stroke:#4285f4

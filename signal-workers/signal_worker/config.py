@@ -48,9 +48,9 @@ class Config(BaseSettings):
       alias="WORKER_POLL_SEC"
     )
 
-    signal_toggle_ttl: float = Field(
-      default=300,
-      alias="SIGNAL_TOGGLE_TTL"
+    state_dir: str = Field(
+      default="./worker_state", 
+      alias="WORKER_STATE_DIR"
     )
 
     signal_pii_ner_model: str = Field(
@@ -58,9 +58,9 @@ class Config(BaseSettings):
       alias="SIGNAL_PII_NER_MODEL"
     )
 
-    signal_pii_batch_size: int = Field(
+    signal_pii_batch: int = Field(
       default=4,
-      alias="SIGNAL_PII_BATCH_SIZE"
+      alias="SIGNAL_PII_BATCH"
     )
 
     signal_pii_cache_max: int = Field(
@@ -68,72 +68,41 @@ class Config(BaseSettings):
       alias="SIGNAL_PII_CACHE_MAX"
     )
 
-    signal_toxicity_cache_max: int = Field(
-      default=20000,
-      alias="SIGNAL_TOXICITY_CACHE_MAX"
+    # ---- quality lens (local-model scoring; see signal_worker/scorers.py) ----
+    signal_quality_semantic: bool = Field(
+      default=True,
+      alias="SIGNAL_QUALITY_SEMANTIC"
     )
 
-    signal_toxicity_batch_size: int = Field(
+    signal_quality_sample: float = Field(
+      default=1.0,
+      alias="SIGNAL_QUALITY_SAMPLE"
+    )
+
+    # FEVER+ANLI fact-verification NLI — benchmarked at AUROC 0.739 on HaluEval QA
+    # vs 0.406 for the generic cross-encoder/nli-deberta-v3-xsmall it replaced
+    # (see docs/QUALITY_BENCHMARK_RESULTS.md). Faithfulness *is* fact verification.
+    signal_quality_nli_model: str = Field(
+      default="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli",
+      alias="SIGNAL_QUALITY_NLI_MODEL"
+    )
+
+    signal_quality_embed_model: str = Field(
+      default="sentence-transformers/all-MiniLM-L6-v2",
+      alias="SIGNAL_QUALITY_EMBED_MODEL"
+    )
+
+    signal_quality_relevance_model: str = Field(
+      default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+      alias="SIGNAL_QUALITY_RELEVANCE_MODEL"
+    )
+
+    signal_quality_batch: int = Field(
       default=32,
-      alias="SIGNAL_TOXICITY_BATCH_SIZE"
+      alias="SIGNAL_QUALITY_BATCH"
     )
 
-    # ── Toxicity — device + perf ────────────────────────────────
-    signal_toxicity_device: str = Field(
-        default="cuda", alias="SIGNAL_TOXICITY_DEVICE"
-    )  # "cuda" | "cpu"
-    signal_toxicity_max_length: int = Field(
-        default=128, alias="SIGNAL_TOXICITY_MAX_LENGTH"
-    )
-    signal_toxicity_fp16: bool = Field(
-        default=True, alias="SIGNAL_TOXICITY_FP16"
-    )
-
-    # ── Toxicity — model paths ─────────────────────────────────
-    # Paths can be absolute, OR relative — relatives are joined to
-    # SIGNAL_TOXICITY_MODELS_ROOT. Useful when a container mounts a
-    # PVC at /opt/models: set the root once, don't touch the four below.
-    signal_toxicity_models_root: str = Field(
-        default="./models", alias="SIGNAL_TOXICITY_MODELS_ROOT"
-    )
-    signal_toxicity_fasttext_path: str = Field(
-        default="fasttext/router_head.ftz",
-        alias="SIGNAL_TOXICITY_FASTTEXT_PATH",
-    )
-    signal_toxicity_pi_path: str = Field(
-        default="transformers/prompt_injection",
-        alias="SIGNAL_TOXICITY_PI_PATH",
-    )
-    signal_toxicity_pi_onnx_path: str = Field(
-        default="onnx_int8/prompt_injection",
-        alias="SIGNAL_TOXICITY_PI_ONNX_PATH",
-    )
-    signal_toxicity_mod_path: str = Field(
-        default="transformers/moderation",
-        alias="SIGNAL_TOXICITY_MOD_PATH",
-    )
-
-    # ── Toxicity — FastText routing thresholds ─────────────────
-    signal_toxicity_attack_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_ATTACK_ROUTE"
-    )
-    signal_toxicity_moderation_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_MODERATION_ROUTE"
-    )
-    signal_toxicity_fast_allow: float = Field(
-        default=0.02, alias="SIGNAL_TOXICITY_FAST_ALLOW"
-    )
-    signal_toxicity_fasttext_direct: float = Field(
-        default=0.97, alias="SIGNAL_TOXICITY_FASTTEXT_DIRECT"
-    )
-
-    # ── Toxicity — BERT review thresholds (drive 0/1 verdicts) ─
-    signal_toxicity_pi_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_PI_THRESHOLD"
-    )
-    signal_toxicity_harmful_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
-    )
-    signal_toxicity_sexual_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_SEXUAL_THRESHOLD"
+    signal_quality_cache_max: int = Field(
+      default=20000,
+      alias="SIGNAL_QUALITY_CACHE_MAX"
     )

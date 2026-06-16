@@ -1,0 +1,75 @@
+{
+  "schema_name": "resume_scoring",
+
+  "type": "object",
+
+  "properties": {
+
+    "candidate_name": {
+      "type": "string",
+      "minLength": 2
+    },
+
+    "email": {
+      "type": "string",
+      "format": "email"
+    },
+
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+
+    "experience_years": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 50
+    },
+
+    "education": {
+      "type": "string"
+    },
+
+    "resume_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+
+    "recommendation": {
+      "type": "string",
+      "enum": [
+        "shortlist",
+        "hold",
+        "reject"
+      ]
+    },
+
+    "strengths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+
+    "skill_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+
+  "required": [
+    "candidate_name",
+    "skills",
+    "experience_years",
+    "resume_score",
+    "recommendation"
+  ],
+
+  "additionalProperties": false
+}

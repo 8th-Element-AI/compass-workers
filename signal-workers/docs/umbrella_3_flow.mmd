@@ -1,0 +1,41 @@
+flowchart TD
+    RAW[("signal_raw_spans<br/>ClickHouse · immutable")]
+    RAW -->|"fetch_batch: recorded_at > watermark<br/>AND span_type IN (validation, skill_exec, ...)"| SPLIT
+
+    SPLIT{"span_type?"}
+
+    subgraph LENS["quality.py — build_context (per span · no models · no cache)"]
+        V["validation span<br/>metadata.input = the record (dict)<br/>metadata.output.errors[]"]
+        S["skill_exec span<br/>records_processed · batch_size"]
+
+        DC1["⭐ data_completeness<br/>filled / total fields of the record<br/>missing = None, '', [], {}"]
+        DA["⭐ data_accuracy<br/>1 − len(errors) / field_count<br/>clamped to [0,1]<br/>errors → metric_meta"]
+        DC2["⭐ data_completeness<br/>records_processed / batch_size<br/>clamped to [0,1]"]
+
+        V --> DC1
+        V --> DA
+        S --> DC2
+    end
+
+    SPLIT -->|validation| V
+    SPLIT -->|skill_exec| S
+
+    DC1 --> SPECS
+    DA --> SPECS
+    DC2 --> SPECS
+    SPECS["2 MetricSpecs emit via ctx_value()<br/>data_completeness (data_op) · data_accuracy (validated_op)"]
+
+    SPECS -->|"bulk INSERT,<br/>watermark advances"| DER[("signal_derived_metrics")]
+    DER -->|"mv_agg_base fires on INSERT"| AGG[("signal_aggregated_metrics<br/>1-min buckets · agg states")]
+    AGG -->|"avgMerge at read time"| READ["dashboards · KPIs<br/>Postgres thresholds → signals"]
+
+    FUTURE["open decision: expected-fields from a<br/>registered record schema (Umbrella 4 schema source)<br/>would make completeness principled"]
+    DC1 -.-> FUTURE
+
+    style DC1 fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style DA fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style DC2 fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style FUTURE fill:#f3e8fd,stroke:#9334e6,stroke-dasharray: 5 5
+    style RAW fill:#e8f0fe,stroke:#4285f4
+    style DER fill:#e8f0fe,stroke:#4285f4
+    style AGG fill:#e8f0fe,stroke:#4285f4

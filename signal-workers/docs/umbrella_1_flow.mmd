@@ -1,0 +1,50 @@
+flowchart TD
+    RAW[("signal_raw_spans<br/>ClickHouse · immutable")]
+    RAW -->|"fetch_batch: recorded_at > watermark<br/>AND span_type IN (model_call, ...)"| COLLECT
+
+    subgraph LENS["quality.py"]
+        COLLECT["collect (input, output) pairs<br/>from model_call metadata"]
+        SAMPLE{"sampled?<br/>deterministic<br/>by span_id"}
+        KEY["job key = g:hash(input):hash(output)<br/>dedupe across the batch"]
+        HIT{"in LRU<br/>cache?"}
+        COLLECT --> SAMPLE
+        SAMPLE -->|yes| KEY --> HIT
+        SAMPLE -->|no| NOROW["no semantic rows for this span"]
+    end
+
+    HIT -->|"miss — unique pairs only"| PREP
+    HIT -->|hit| CTX
+
+    subgraph SCORER["⭐ scorers.py"]
+        PREP["LocalScorer — ONE batched call per batch<br/>normalize_output: JSON → 'key is value.' lines<br/>split sentences · cap 10 per side"]
+        F["faithfulness<br/>NLI entailment (deberta-base-fever-anli)<br/>premise = input (2k chars)<br/>hypothesis = each output sentence<br/>score = mean entailment prob"]
+        C["coherence<br/>NLI contradiction over adjacent<br/>output sentence pairs<br/>score = 1 − mean contradiction<br/>needs ≥2 sentences, else no row"]
+        K["completeness<br/>MiniLM embeddings, L2-normalized<br/>mean over input sentences of<br/>best cosine vs output sentences"]
+        PREP --> F
+        PREP --> C
+        PREP --> K
+    end
+
+    F --> PUT["scores + evidence<br/>→ content-hash LRU cache"]
+    C --> PUT
+    K --> PUT
+    PUT --> CTX
+
+    subgraph ENGINE["spec.py"]
+        CTX["build_context:<br/>look up cached scores for this span's pair"]
+        SPECS["⭐ 3 MetricSpecs emit via ctx_value()<br/>faithfulness · coherence · completeness<br/>evidence (out_sents, min_entail) → metric_meta"]
+        CTX --> SPECS
+    end
+
+    SPECS -->|"one bulk INSERT per batch,<br/>then watermark advances"| DER[("signal_derived_metrics<br/>1 row / metric / span · EAV")]
+    DER -->|"mv_agg_base fires on INSERT<br/>(automatic, no cron)"| AGG[("signal_aggregated_metrics<br/>1-min buckets · agg states")]
+    AGG -->|"avgMerge / quantilesTDigestMerge<br/>at read time"| READ["dashboards · KPIs<br/>Postgres thresholds → signals"]
+
+    style SCORER fill:#fff3cd,stroke:#d4a017,stroke-width:3px
+    style SPECS fill:#fff3cd,stroke:#d4a017,stroke-width:2px
+    style F fill:#ffe9a8,stroke:#d4a017
+    style C fill:#ffe9a8,stroke:#d4a017
+    style K fill:#ffe9a8,stroke:#d4a017
+    style RAW fill:#e8f0fe,stroke:#4285f4
+    style DER fill:#e8f0fe,stroke:#4285f4
+    style AGG fill:#e8f0fe,stroke:#4285f4

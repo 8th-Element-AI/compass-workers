@@ -36,4 +36,8 @@ pydantic_settings
 -r ./PII/requirements.txt
 -e ./PII
 
--e ./toxicity
+# Quality lens — local semantic scoring (NLI / embedding / relevance models).
+# Pulls in torch + transformers. Models download from the HuggingFace Hub on
+# first run; to disable semantic scoring entirely (mechanical quality metrics
+# only, no torch), set SIGNAL_QUALITY_SEMANTIC=false.
+sentence-transformers>=2.7

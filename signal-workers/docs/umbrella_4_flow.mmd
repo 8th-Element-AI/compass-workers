@@ -1,0 +1,32 @@
+flowchart TD
+    RAW[("signal_raw_spans<br/>ClickHouse · immutable")]
+    RAW --> SPLIT{"span_type?"}
+
+    subgraph LENS["quality.py — capture helpers (v1 · mechanical · no models)"]
+        FC["⭐ format_correctness<br/>declared format checked if present,<br/>else: JSON-looking output must parse<br/>plain text → 1.0 (nothing to violate)"]
+        SC["⭐ schema_conformance<br/>validation: trust recorded valid flag<br/>model_call: declared schema's<br/>required keys present in output<br/>no schema declared → no row"]
+        TV["⭐ tool_call_validity<br/>tool name non-empty ·<br/>request parses to dict/list ·<br/>response present when status ok<br/>failed checks → metric_meta"]
+        CS["⭐ constraint_satisfaction<br/>metadata.constraints convention:<br/>max/min chars · words · contains ·<br/>not_contains · format<br/>not declared → no row<br/>violated/unchecked → metric_meta"]
+    end
+
+    SPLIT -->|"model_call · tool_call · validation"| FC
+    SPLIT -->|"model_call · validation"| SC
+    SPLIT -->|tool_call| TV
+    SPLIT -->|"any span"| CS
+
+    FC --> SPECS["4 MetricSpecs emit via ctx_value()<br/>booleans → pass rates at rollup"]
+    SC --> SPECS
+    TV --> SPECS
+    CS --> SPECS
+
+    SPECS --> DER[("signal_derived_metrics")]
+    DER -->|"mv_agg_base"| AGG[("signal_aggregated_metrics")]
+    AGG --> READ["dashboards · thresholds → signals"]
+
+    style FC fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style SC fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style TV fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style CS fill:#ffe9a8,stroke:#d4a017,stroke-width:2px
+    style RAW fill:#e8f0fe,stroke:#4285f4
+    style DER fill:#e8f0fe,stroke:#4285f4
+    style AGG fill:#e8f0fe,stroke:#4285f4

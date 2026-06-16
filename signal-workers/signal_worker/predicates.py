@@ -71,3 +71,31 @@ def cost_kb(span):
 
 def solution_only(span):
     return span.get("span_type") == "solution"
+
+
+# ---- quality-lens predicates ----
+def retrieval_op(span):
+    return span.get("span_type") == "retrieval"
+
+
+def tool_op(span):
+    return span.get("span_type") == "tool_call"
+
+
+def validated_op(span):
+    return span.get("span_type") == "validation"
+
+
+def data_op(span):
+    """Spans that process data records (field/record-level quality applies)."""
+    return span.get("span_type") in ("validation", "skill_exec")
+
+
+def output_bearing(span):
+    """Spans whose metadata carries a checkable output payload."""
+    return span.get("span_type") in ("model_call", "tool_call", "validation")
+
+
+def schema_checked(span):
+    """Spans that can carry / be checked against an expected schema."""
+    return span.get("span_type") in ("model_call", "validation")
