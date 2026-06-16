@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.7
+#
+# signal-worker:safety — extends :base with the ML stack + model weights.
+# Performance + Cost use :base; only Safety needs this image.
+#
+# Build :base FIRST so the `FROM signal-worker:base` reference resolves:
+#   docker build -f signal-workers/Dockerfile -t signal-worker:base .
+#
+# Then build :safety with HF auth:
+#   $env:DOCKER_BUILDKIT=1
+#   docker build `
+#     --secret id=hf_token,env=HF_TOKEN `
+#     -f signal-workers/Dockerfile.safety `
+#     -t signal-worker:safety .
+
+# ────────────────────────────────────────────────────────────────
+# Stage 1 — model downloader (HF_TOKEN never leaves this stage)
+# ────────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS models
+WORKDIR /build
+ENV HF_HOME=/opt/hf-cache
+
+COPY toxicity/pyproject.toml /build/toxicity/pyproject.toml
+COPY toxicity/toxicity_observability /build/toxicity/toxicity_observability
+COPY toxicity/configs /build/toxicity/configs
+RUN pip install --no-cache-dir -e /build/toxicity huggingface_hub transformers
+
+RUN --mount=type=secret,id=hf_token \
+    if [ -f /run/secrets/hf_token ]; then \
+        export HF_TOKEN=$(cat /run/secrets/hf_token); \
+    fi && \
+    cd /build/toxicity && \
+    toxicity-observe download --config configs/runtime.yaml
+
+# Pre-cache PII NER model — PresidioEngine refuses to download at runtime.
+RUN python -c "from transformers import pipeline; \
+    pipeline('ner', \
+             model='gravitee-io/bert-small-pii-detection', \
+             aggregation_strategy='first')"
+
+# ────────────────────────────────────────────────────────────────
+# Final — extend :base with the ML stack
+# ────────────────────────────────────────────────────────────────
+FROM signal-worker:base AS runtime
+
+USER root
+
+# Runtime + build deps for the ML stack (fasttext needs gcc, libgomp at runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU torch first — big wheel, changes rarely, good cache.
+RUN pip install --no-cache-dir \
+        torch \
+        --index-url https://download.pytorch.org/whl/cpu
+
+# Stage sibling packages and install editable. The /opt/signal paths must
+# stay stable — the editable .pth files in the venv record absolute paths.
+WORKDIR /opt/signal
+COPY PII      /opt/signal/PII
+COPY toxicity /opt/signal/toxicity
+
+RUN pip install --no-cache-dir -r /opt/signal/PII/requirements.txt && \
+    pip install --no-cache-dir -e /opt/signal/PII && \
+    pip install --no-cache-dir -e /opt/signal/toxicity
+
+# spaCy tokenizer for Presidio
+RUN python -m spacy download en_core_web_sm
+
+# Models (~1.5 GB) + HF cache (~220 MB) from the sandboxed downloader stage
+COPY --from=models /build/toxicity/models /opt/models
+COPY --from=models /opt/hf-cache /opt/hf-cache
+
+# Safety-specific env defaults
+ENV SIGNAL_TOXICITY_MODELS_ROOT=/opt/models \
+    SIGNAL_TOXICITY_DEVICE=cpu \
+    HF_HOME=/opt/hf-cache
+
+# Override :base's default CMD
+ENTRYPOINT ["python", "run_worker.py", "--worker", "safety"]

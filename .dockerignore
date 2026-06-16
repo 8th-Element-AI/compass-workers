@@ -1,0 +1,40 @@
+# Python build artifacts
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/build
+**/dist
+**/*.egg-info
+
+# Editor / OS noise
+**/.git
+**/.gitignore
+**/.idea
+**/.vscode
+**/.DS_Store
+**/Thumbs.db
+
+# Local-only state — never bake into image
+**/.env
+**/.env.local
+**/.env.docker
+state-dir
+**/state
+**/worker_state
+**/*.checkpoint
+
+# Models live in /opt/models via Stage 1, not via COPY
+**/models/
+
+# Skip infra data CSVs (large)
+infra/data
+infra/**/*.csv
+
+# Docs (only README under signal-workers is referenced)
+**/*.md
+!signal-workers/README.md

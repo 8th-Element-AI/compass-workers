@@ -35,3 +35,5 @@ pydantic_settings
 #     export SIGNAL_PII_NER_MODEL=gravitee-io/bert-small-pii-detection
 -r ./PII/requirements.txt
 -e ./PII
+
+-e ./toxicity

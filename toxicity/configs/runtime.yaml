@@ -1,0 +1,42 @@
+models:
+  fasttext_router:
+    # Preferred: upload models/fasttext/router_head.ftz to a HF repo and set repo_id.
+    repo_id: "Krishagarwal314/safety-fasttext-router"
+    filename: "router_head.ftz"
+    local_path: "models/fasttext/router_head.ftz"
+
+  prompt_injection:
+    # Replace with your fine-tuned/quantized prompt-injection repo if uploaded.
+    repo_id: "Krishagarwal314/safety-prompt-injection"
+    local_path: "models/transformers/prompt_injection"
+
+  prompt_injection_onnx_int8:
+    # Optional artifact for deployment experiments; runtime uses prompt_injection above by default.
+    repo_id: "Krishagarwal314/safety-prompt-injection-onnx-int8"
+    local_path: "models/onnx_int8/prompt_injection"
+
+  moderation:
+    # Replace with your fine-tuned 2-label Koala merged moderation repo.
+    repo_id: "Krishagarwal314/safety-moderation-2head"
+    local_path: "models/transformers/moderation"
+
+thresholds:
+  # FastText routing thresholds. Conservative defaults; replace from
+  # reports/fasttext_router_thresholds.json after calibration.
+  attack_route: 0.05
+  moderation_route: 0.05
+  fast_allow: 0.02
+
+  # FastText direct classification threshold — skip BERT when FastText is this confident.
+  fasttext_direct: 0.97
+
+  # BERT score thresholds for observability counters.
+  prompt_injection_review: 0.50
+  harmful_content_review: 0.50
+  sexual_review: 0.50
+
+runtime:
+  device: "cuda"
+  max_length: 128
+  fp16_on_cuda: true
+  full_scan_default: false

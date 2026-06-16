@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.7
+#
+# signal-worker:cost — Cost lens worker.
+# Identical content to :base; only the default CMD differs.
+#
+# Build (after building :base):
+#   docker build -f signal-workers/Dockerfile.cost -t signal-worker:cost .
+
+FROM signal-worker:base
+ENTRYPOINT ["python", "run_worker.py", "--worker", "cost"]

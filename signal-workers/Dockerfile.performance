@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.7
+#
+# signal-worker:performance — Performance lens worker.
+# Identical content to :base; only the default CMD differs.
+#
+# Build (after building :base):
+#   docker build -f signal-workers/Dockerfile.performance -t signal-worker:performance .
+
+FROM signal-worker:base
+ENTRYPOINT ["python", "run_worker.py", "--worker", "performance"]

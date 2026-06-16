@@ -1,0 +1,6 @@
+PROMPT_INJECTION = "prompt_injection"
+HARMFUL_CONTENT = "harmful_content"
+SEXUAL = "sexual"
+SAFE = "safe"
+
+PUBLIC_LABELS = (PROMPT_INJECTION, HARMFUL_CONTENT, SEXUAL)
