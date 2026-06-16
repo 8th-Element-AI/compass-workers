@@ -1,0 +1,50 @@
+services:
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    ports:
+      - "8123:8123"   # HTTP — Play UI at http://localhost:8123/play
+      - "9000:9000"   # native TCP
+    environment:
+      CLICKHOUSE_DB:       ${CLICKHOUSE_DATABASE:-otel}
+      CLICKHOUSE_USER:     ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - clickhouse-infra
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP  ← all apps point OBS_OTLP_ENDPOINT here
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    environment:
+      CLICKHOUSE_HOST:     clickhouse
+      CLICKHOUSE_PORT:     ${CLICKHOUSE_PORT:-9000}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-otel}
+      CLICKHOUSE_USER:     ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    networks:
+      - clickhouse-infra
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  clickhouse-infra:
+    driver: bridge
+
+volumes:
+  clickhouse_data:
