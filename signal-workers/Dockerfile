@@ -21,13 +21,16 @@ RUN pip install --no-cache-dir \
         "clickhouse-connect>=0.7" \
         "psycopg[binary]>=3.1" \
         "python-dotenv>=1.0" \
-        "pydantic_settings"
+        "pydantic_settings" \
+        "prometheus_client>=0.20"
 
 WORKDIR /app
 COPY signal-workers/signal_worker /app/signal_worker
 COPY signal-workers/run_worker.py /app/run_worker.py
 
 ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
 
 ENTRYPOINT ["python", "run_worker.py"]
 # No CMD here — children set their own; this image isn't deployed.

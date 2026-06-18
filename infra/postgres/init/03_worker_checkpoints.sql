@@ -1,5 +1,5 @@
 -- ─────────────────────────────────────────────────────────────────────
--- worker_checkpoints — high-watermark per (lens, partition_key)
+-- worker_checkpoints — high-checkpoint per (lens, partition_key)
 -- ─────────────────────────────────────────────────────────────────────
 -- Replaces the file-based checkpoint. Required for K8s deployments that
 -- run more than one replica of a lens. Today partition_key is always
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS worker_checkpoints (
     PRIMARY KEY (lens, partition_key)
 );
 
-COMMENT ON TABLE  worker_checkpoints              IS 'High-watermark per (lens, partition). Updated atomically each worker batch.';
+COMMENT ON TABLE  worker_checkpoints              IS 'High-checkpoint per (lens, partition). Updated atomically each worker batch.';
 COMMENT ON COLUMN worker_checkpoints.lens         IS 'Lens name: performance | cost | safety | ...';
 COMMENT ON COLUMN worker_checkpoints.partition_key IS 'Future: hash-partitioned consumption. Today always ''default''.';
 COMMENT ON COLUMN worker_checkpoints.checkpoint    IS 'Last successfully-processed recorded_at, as ''YYYY-MM-DD HH:MM:SS.mmm''.';

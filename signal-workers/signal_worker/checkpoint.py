@@ -25,24 +25,20 @@ import threading
 
 log = logging.getLogger("signal.worker.checkpoint")
 
-DEFAULT_WATERMARK = "1970-01-01 00:00:00.000"
+DEFAULT_CHECKPOINT = "1970-01-01 00:00:00.000"
 
 
 class PostgresCheckpointStore:
-    """One row per (lens, partition_key). Atomic UPSERT per save.
+    """Postgres-backed checkpoint store.
 
-    Connection is opened lazily on first call and held for the worker's
-    lifetime. Save failures propagate — the run loop will crash, the pod
-    will restart, and load() will pick up the last successfully-written
-    checkpoint. That's what we want.
+    One row per (lens, partition_key) in worker_checkpoints. Each save is
+    an atomic UPSERT. For unpartitioned lenses, partition_key="default";
+    for partitioned lenses, partition_key="slot:<n>" — see
+    signal_worker.partition.slot_partition_key.
     """
-
-    # Future: pod-specific partitioning. Today: always 'default'.
-    PARTITION_KEY = "default"
 
     def __init__(self, dsn: str, updated_by: str | None = None):
         self.dsn = dsn
-        # Diagnostic: lets us see which pod wrote last.
         self.updated_by = updated_by or os.environ.get("HOSTNAME") or "unknown"
         self._conn = None
         self._lock = threading.Lock()
@@ -57,25 +53,30 @@ class PostgresCheckpointStore:
             )
         return self._conn
 
-    def load(self, lens: str) -> str:
+    def load(self, lens: str, partition_key: str = "default") -> str:
         with self._lock:
             conn = self._connection()
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT checkpoint FROM worker_checkpoints "
                     "WHERE lens = %s AND partition_key = %s",
-                    (lens, self.PARTITION_KEY),
+                    (lens, partition_key),
                 )
                 row = cur.fetchone()
                 if row is None:
                     log.info(
-                        "[checkpoint] %s: no row — starting from %s",
-                        lens, DEFAULT_WATERMARK,
+                        "[checkpoint] %s/%s: no row — starting from %s",
+                        lens, partition_key, DEFAULT_CHECKPOINT,
                     )
-                    return DEFAULT_WATERMARK
+                    return DEFAULT_CHECKPOINT
                 return row[0]
 
-    def save(self, lens: str, checkpoint: str) -> None:
+    def save(
+        self,
+        lens: str,
+        checkpoint: str,
+        partition_key: str = "default",
+    ) -> None:
         with self._lock:
             conn = self._connection()
             with conn.cursor() as cur:
@@ -89,5 +90,5 @@ class PostgresCheckpointStore:
                            updated_at = now(),
                            updated_by = EXCLUDED.updated_by
                     """,
-                    (lens, self.PARTITION_KEY, checkpoint, self.updated_by),
+                    (lens, partition_key, checkpoint, self.updated_by),
                 )

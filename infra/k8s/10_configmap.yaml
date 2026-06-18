@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signal-worker-config
+  namespace: signal
+data:
+  # ── Datastore connections (override per environment) ──
+  CH_HOST: "clickhouse.signal.svc.cluster.local"
+  CH_PORT: "8123"
+  CH_DB: "signal"
+  CH_USER: "default"
+
+  # ── Worker run loop ──
+  WORKER_BATCH: "5000"
+  WORKER_POLL_SEC: "5.0"
+  SIGNAL_TOGGLE_TTL: "300"
+
+  # ── Horizontal scaling ──
+  # WORKER_PARTITION_COUNT is set per-Deployment/StatefulSet, NOT here,
+  # because it differs by lens (Performance=1, Cost=1, Safety=N).
+  # WORKER_PARTITION_INDEX is derived from POD_NAME by run_worker.py.
+  WORKER_PARTITION_TOTAL_SLOTS: "16"
+
+  # ── Observability ──
+  OBSERVABILITY_PORT: "8080"
+
+  # ── Safety lens (harmless for other lenses; they don't import the package) ──
+  SIGNAL_TOXICITY_DEVICE: "cpu"
+  SIGNAL_TOXICITY_BATCH_SIZE: "32"
+  SIGNAL_TOXICITY_MAX_LENGTH: "128"
+  SIGNAL_TOXICITY_FP16: "true"
+  SIGNAL_TOXICITY_ATTACK_ROUTE: "0.05"
+  SIGNAL_TOXICITY_MODERATION_ROUTE: "0.05"
+  SIGNAL_TOXICITY_FAST_ALLOW: "0.02"
+  SIGNAL_TOXICITY_FASTTEXT_DIRECT: "0.97"
+  SIGNAL_TOXICITY_PI_REVIEW: "0.50"
+  SIGNAL_TOXICITY_HARMFUL_REVIEW: "0.50"
+  SIGNAL_TOXICITY_SEXUAL_REVIEW: "0.50"
+  SIGNAL_TOXICITY_CACHE_MAX: "20000"
+  SIGNAL_PII_NER_MODEL: "gravitee-io/bert-small-pii-detection"
+  SIGNAL_PII_BATCH: "4"
+  SIGNAL_PII_CACHE_MAX: "20000"

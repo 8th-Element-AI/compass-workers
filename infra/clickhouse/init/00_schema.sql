@@ -47,6 +47,12 @@ CREATE TABLE signal_raw_spans
     correlation_id  String DEFAULT '',
     session_id      String DEFAULT '',
 
+    -- Deterministic 16-way partition for horizontal worker scaling.
+    -- Computed at ingestion from trace_id; used by lens workers to fetch
+    -- a fixed slice of spans without coordination. See
+    -- signal-workers/signal_worker/partition.py.
+    partition_id    UInt8 MATERIALIZED cityHash64(trace_id) % 16,
+
     span_type       LowCardinality(String),   -- solution/workflow/agent/model_call/tool_call/embedding/retrieval/memory_read/skill_exec/parsing/validation
     span_name       String,
     span_status     LowCardinality(String),   -- ok/error/timeout
@@ -77,7 +83,9 @@ CREATE TABLE signal_raw_spans
     -- temperature/max_tokens, error_type/code/message/source/severity, ...) lives in one JSON blob:
     metadata        String DEFAULT '' CODEC(ZSTD(3)),
 
-    recorded_at     DateTime64(3, 'UTC') DEFAULT now64(3)
+    recorded_at     DateTime64(3, 'UTC') DEFAULT now64(3),
+
+    INDEX idx_partition_id partition_id TYPE set(16) GRANULARITY 8
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(started_at)

@@ -48,6 +48,26 @@ class Config(BaseSettings):
       alias="WORKER_POLL_SEC"
     )
 
+    # ─── Horizontal scaling (Phase 4.3) ──────────────────────────────
+    worker_partition_index: int = Field(
+        default=0,
+        alias="WORKER_PARTITION_INDEX",
+    )
+    worker_partition_count: int = Field(
+        default=1,
+        alias="WORKER_PARTITION_COUNT",
+    )
+    worker_partition_total_slots: int = Field(
+        default=16,
+        alias="WORKER_PARTITION_TOTAL_SLOTS",
+    )
+
+    # ─── Observability ──────────────────────────────────────
+    observability_port: int = Field(
+        default=8080,
+        alias="OBSERVABILITY_PORT",
+    )
+
     signal_toggle_ttl: float = Field(
       default=300,
       alias="SIGNAL_TOGGLE_TTL"

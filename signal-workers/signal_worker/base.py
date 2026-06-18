@@ -107,11 +107,35 @@ class BaseWorker:
 
     def __init__(self, cfg):
         """Hold config and prepare lazy CH handle + shutdown event."""
+        from .partition import compute_slots, is_partitioned
+
         self.cfg = cfg
         self._ch = None
         # Shutdown signal — set by stop() to terminate run_poll cleanly between batches.
         self._stop_event = threading.Event()
 
+        # Slot ownership — same code path whether partitioned or not. When
+        # is_partitioned is False, my_slots = [None] and the per-slot loop
+        # collapses to one iteration with no partition filter.
+        self.partitioned = is_partitioned(cfg.worker_partition_count)
+        if self.partitioned:
+            self.my_slots = compute_slots(
+                cfg.worker_partition_index,
+                cfg.worker_partition_count,
+                cfg.worker_partition_total_slots,
+            )
+            log.info(
+                "[%s] partition: pod=%d/%d owns_slots=%s",
+                self.lens,
+                cfg.worker_partition_index,
+                cfg.worker_partition_count,
+                self.my_slots,
+            )
+        else:
+            self.my_slots = [None]  # sentinel: one iteration, no filter
+            log.info("[%s] partition: single-pod (unpartitioned)", self.lens)
+
+        self._current_slot = "all"  # for logging/metrics; updated each batch in run_poll
     # ---- which metrics this lens is responsible for (for logging/guardrails) ----
     def owns(self) -> set:
         """Set of metric names this lens emits. Subclasses must override."""
@@ -157,7 +181,7 @@ class BaseWorker:
         return self._ckpt_store
 
     def load_checkpoint(self):
-        """Return this lens's saved high-watermark from PG, or the epoch default if none.
+        """Return this lens's saved high-checkpoint from PG, or the epoch default if none.
 
         Returns:
             A 'YYYY-MM-DD HH:MM:SS.mmm' string usable as fetch_batch(since=...).
@@ -165,33 +189,50 @@ class BaseWorker:
         return self._checkpoint_store().load(self.lens)
 
     def save_checkpoint(self, cp):
-        """Atomically UPSERT this lens's high-watermark into PG.
+        """Atomically UPSERT this lens's high-checkpoint into PG.
 
         Args:
-            wm: New high-watermark string ('YYYY-MM-DD HH:MM:SS.mmm').
+            wm: New high-checkpoint string ('YYYY-MM-DD HH:MM:SS.mmm').
         """
         self._checkpoint_store().save(self.lens, cp)
+    
+    def _partition_key_for(self, slot: int | None) -> str:
+        """Pick the worker_checkpoints.partition_key for this slot."""
+        from .partition import slot_partition_key
+        if slot is None:
+            return "default"
+        return slot_partition_key(slot)
 
     # ---- fetch a batch of spans newer than the checkpoint ----
-    def fetch_batch(self, since: str, limit: int):
-        """Fetch up to `limit` spans with recorded_at > `since`, ordered by recorded_at.
-
-        If `self.span_types` is set, the filter is pushed into the SQL.
+    def fetch_batch(self, since: str, limit: int, slot: int | None = None,):
+        """Fetch spans with recorded_at > since, optionally filtered to a slot.
 
         Args:
-            since: High-watermark string from load_checkpoint().
-            limit: Maximum number of spans to return.
+            since: Checkpoint string from load_checkpoint().
+            limit: Maximum spans to return.
+            slot: If set, restrict to partition_id = slot. None = all rows
+                (used by unpartitioned lenses).
         """
-        type_filter = ""
-        if self.span_types:
-            lits = ", ".join("'" + t + "'" for t in self.span_types)
-            type_filter = f"AND span_type IN ({lits}) "
-        q = (
-            f"SELECT {', '.join(RAW_COLS)} FROM signal_raw_spans "
-            f"WHERE recorded_at > %(since)s {type_filter}"
-            f"ORDER BY recorded_at LIMIT %(lim)s"
+        partition_clause = (
+            "" if slot is None else f"AND partition_id = {slot}"
         )
-        res = self.ch().query(q, parameters={"since": since, "lim": limit})
+        span_types_clause = ""
+        params = {"since": since, "lim": limit}
+
+        if self.span_types is not None:
+            in_list = ",".join(f"'{t}'" for t in self.span_types)
+            span_types_clause = f"AND span_type IN ({in_list})"
+
+        q = f"""
+            SELECT *
+            FROM signal_raw_spans
+            WHERE recorded_at > %(since)s
+              {partition_clause}
+              {span_types_clause}
+            ORDER BY recorded_at
+            LIMIT %(lim)s
+        """
+        res = self.ch().query(q, parameters=params)
         return [dict(zip(res.column_names, row)) for row in res.result_rows]
 
     # ---- write computed rows ----
@@ -225,37 +266,115 @@ class BaseWorker:
 
     # ---- poll loop (production-ish) ----
     def run_poll(self, once: bool = False):
-        """Production poll loop: fetch -> process -> write -> checkpoint, on repeat.
+        """Production poll loop: per-slot fetch → process → write → checkpoint.
 
-        Each batch is restart-safe via a deterministic dedup token passed to
-        write(). Crash between write and save_checkpoint just means the same
-        batch is re-attempted on next start and ClickHouse drops it.
+        For unpartitioned lenses (single pod, no partition filter), my_slots
+        is [None] and this collapses to the previous single-iteration loop.
+
+        For partitioned lenses, each iteration walks every slot the pod owns,
+        processing what's available in each. Slot checkpoints are independent,
+        so a slow slot doesn't block fast ones, and pod-count changes are
+        absorbed automatically — a new pod inheriting slot 7 reads slot 7's
+        checkpoint and resumes from there.
 
         Args:
             once: If True, process at most one non-empty batch and return.
         """
-        log.info("[%s] starting poll loop (batch=%d)", self.lens, self.cfg.batch_size)
+        from datetime import datetime, timezone
+        from .observability import (
+            BATCHES_TOTAL,
+            SPANS_PROCESSED,
+            ROWS_EMITTED,
+            BATCH_DURATION,
+            WRITE_DURATION,
+            CHECKPOINT_LAG,
+            set_ready,
+        )
+
+        log.info(
+            "[%s] starting poll loop (batch=%d slots=%s)",
+            self.lens, self.cfg.batch_size,
+            "all" if not self.partitioned else self.my_slots,
+        )
+        print(f"[{self.lens}] starting poll loop (batch={self.cfg.batch_size} "
+              f"slots={'all' if not self.partitioned else self.my_slots})")
+        set_ready(True)
+
         while not self._stop_event.is_set():
-            wm = self.load_checkpoint()
-            spans = self.fetch_batch(wm, self.cfg.batch_size)
-            print(f"Fetched {len(spans)} spans newer than {wm}\n")
-            if spans:
-                rows = self.process_batch(spans)
-                newest = wm
-                for s in spans:
-                    rec = str(s["recorded_at"])
-                    if rec > newest:
-                        newest = rec
-                dedup_token = f"{self.lens}:{newest}:{len(spans)}"
-                self.write(rows, dedup_token=dedup_token)
-                self.save_checkpoint(newest)
-                log.info(
-                    "[%s] %d spans -> %d metrics (wm=%s token=%s)",
-                    self.lens, len(spans), len(rows), newest, dedup_token,
-                )
-            if once:
+            any_processed = False
+
+            for slot in self.my_slots:
+                if self._stop_event.is_set():
+                    break
+
+                slot_label = "all" if slot is None else str(slot)
+                pk = self._partition_key_for(slot)
+
+                # Per-slot checkpoint + lag gauge
+                wm = self._checkpoint_store().load(self.lens, partition_key=pk)
+                try:
+                    wm_dt = datetime.strptime(wm[:23], "%Y-%m-%d %H:%M:%S.%f")\
+                        .replace(tzinfo=timezone.utc)
+                    CHECKPOINT_LAG.labels(lens=self.lens, slot=slot_label).set(
+                        (datetime.now(timezone.utc) - wm_dt).total_seconds()
+                    )
+                except Exception:
+                    pass
+
+                spans = self.fetch_batch(wm, self.cfg.batch_size, slot=slot)
+                print(f"[{self.lens}:s{slot_label}] fetched {len(spans)} "
+                      f"spans newer than {wm}")
+
+                if not spans:
+                    BATCHES_TOTAL.labels(
+                        lens=self.lens, slot=slot_label, result="empty"
+                    ).inc()
+                    continue
+
+                any_processed = True
+                SPANS_PROCESSED.labels(lens=self.lens, slot=slot_label).inc(len(spans))
+
+                try:
+                    self._current_slot = slot_label
+                    with BATCH_DURATION.labels(lens=self.lens, slot=slot_label).time():
+                        rows = self.process_batch(spans)
+
+                    newest = wm
+                    for s in spans:
+                        rec = str(s["recorded_at"])
+                        if rec > newest:
+                            newest = rec
+
+                    # Slot in the token so two pods owning different slots
+                    # produce distinct tokens — no collisions in the dedup window.
+                    dedup_token = f"{self.lens}:s{slot_label}:{newest}:{len(spans)}"
+
+                    with WRITE_DURATION.labels(lens=self.lens, slot=slot_label).time():
+                        self.write(rows, dedup_token=dedup_token)
+
+                    self._checkpoint_store().save(self.lens, newest, partition_key=pk)
+
+                    ROWS_EMITTED.labels(lens=self.lens, slot=slot_label).inc(len(rows))
+                    BATCHES_TOTAL.labels(
+                        lens=self.lens, slot=slot_label, result="success"
+                    ).inc()
+
+                    log.info(
+                        "[%s:s%s] %d spans -> %d metrics (wm=%s token=%s)",
+                        self.lens, slot_label, len(spans), len(rows), newest, dedup_token,
+                    )
+                except Exception:
+                    BATCHES_TOTAL.labels(
+                        lens=self.lens, slot=slot_label, result="error"
+                    ).inc()
+                    log.exception("[%s:s%s] batch failed; pod will restart",
+                                  self.lens, slot_label)
+                    raise
+
+            if once and any_processed:
                 break
-            # Wait on the stop event instead of sleeping — wakes immediately on stop().
-            if not spans:
+
+            if not any_processed:
                 self._stop_event.wait(self.cfg.poll_sec)
+
         log.info("[%s] poll loop exited", self.lens)

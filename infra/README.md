@@ -47,7 +47,7 @@ infra/
 │       ├── 00_schema.sql              v5 schema: enums, 7 registry tables, indexes
 │       ├── 01_registry_bindings.sql   seeded solutions/endpoints/workflows/agents/components + bindings
 │       ├── 02_thresholds.sql          721 seeded thresholds (perf/quality/cost/safety/outcomes)
-│       └── 03_worker_checkpoints.sql  worker high-watermark table (lens, partition_key, watermark)
+│       └── 03_worker_checkpoints.sql  worker high-checkpoint table (lens, partition_key, checkpoint)
 ├── clickhouse/
 │   └── init/
 │       └── 00_schema.sql              raw_spans + derived_metrics + aggregated + mv_agg_base MV
@@ -162,14 +162,14 @@ with your actual entity registry before the first boot.
 
 ### 5.3 Worker checkpoints (`03_worker_checkpoints.sql`)
 
-One row per `(lens, partition_key)`. Each worker UPSERTs its high-watermark
+One row per `(lens, partition_key)`. Each worker UPSERTs its high-checkpoint
 after every batch:
 
 ```sql
 CREATE TABLE worker_checkpoints (
     lens          TEXT        NOT NULL,
     partition_key TEXT        NOT NULL DEFAULT 'default',
-    watermark     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
+    checkpoint     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by    TEXT,                          -- HOSTNAME of the writer pod
     PRIMARY KEY (lens, partition_key)

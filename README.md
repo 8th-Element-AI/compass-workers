@@ -3,14 +3,14 @@
 Production observability workers for the Signal platform. Each lens runs as
 an independent Kubernetes Deployment, reads immutable spans from ClickHouse,
 computes its metrics, and writes the results back. State (per-lens
-high-watermark) lives in Postgres; writes are idempotent under restart.
+high-checkpoint) lives in Postgres; writes are idempotent under restart.
 
 ```
 signal_raw_spans  ──►  [ lens worker ]  ──►  signal_derived_metrics  ──(MV)──►  signal_aggregated_metrics
    (what happened)        (compute)              (one row / metric / span)         (1-min rollup buckets)
                                 ▲
                                 │
-                            worker_checkpoints (PG)   ─── one high-watermark per lens
+                            worker_checkpoints (PG)   ─── one high-checkpoint per lens
 ```
 
 **One worker per lens, one image per lens, one Deployment per lens.** Performance and Cost are CPU-only and tiny. Safety carries the ML stack (Presidio, transformers, fasttext) and the model weights.
@@ -153,7 +153,7 @@ The workers expect these tables to exist:
 - `solutions`, `endpoints`, `workflows`, `agents`, `components`, `bindings` — entity registry.
 - `performance_thresholds`, `quality_thresholds`, `cost_thresholds`, `safety_thresholds`, `outcomes_thresholds` — toggle gates (read by `ToggleCache`).
 - `components.pricing` JSONB — read by Cost's `PricingCache`.
-- **`worker_checkpoints`** (`infra/postgres/init/03_worker_checkpoints.sql`) — high-watermark per lens.
+- **`worker_checkpoints`** (`infra/postgres/init/03_worker_checkpoints.sql`) — high-checkpoint per lens.
 
 Run the infra Docker compose stack to get all of the above:
 
@@ -596,8 +596,8 @@ K8s gives `terminationGracePeriodSeconds: 60` for this drain. If a batch is stil
 
 Pods are stateless. On restart:
 
-1. `load_checkpoint()` reads the saved watermark from `worker_checkpoints` in Postgres.
-2. `fetch_batch(since=watermark, ...)` returns spans newer than that.
+1. `load_checkpoint()` reads the saved checkpoint from `worker_checkpoints` in Postgres.
+2. `fetch_batch(since=checkpoint, ...)` returns spans newer than that.
 3. Compute → write → save_checkpoint as normal.
 
 If the prior shutdown happened mid-batch:
@@ -610,7 +610,7 @@ If the prior shutdown happened mid-batch:
 
 ```sql
 UPDATE worker_checkpoints
-SET watermark = '2026-06-14 00:00:00.000', updated_by = 'manual-rewind'
+SET checkpoint = '2026-06-14 00:00:00.000', updated_by = 'manual-rewind'
 WHERE lens = 'safety';
 ```
 
@@ -627,7 +627,7 @@ K8s rolls one pod at a time. New pod starts, becomes ready, old pod gets SIGTERM
 **Check what each lens last did**:
 
 ```sql
-SELECT lens, watermark, updated_at, updated_by
+SELECT lens, checkpoint, updated_at, updated_by
 FROM worker_checkpoints
 ORDER BY lens;
 ```

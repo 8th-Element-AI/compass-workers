@@ -28,6 +28,12 @@ from signal_worker.lenses.cost import CostWorker
 from signal_worker.lenses.performance import PerformanceWorker
 from signal_worker.lenses.safety import SafetyWorker
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
 logger = logging.getLogger(__name__)
 
 LENSES = {
@@ -130,10 +136,38 @@ def show_specs(lens: str, cfg: Config) -> None:
             f"{'Y' if s.per_span else 'read':8}"
         )
 
+def _derive_partition_index_from_pod_name():
+    """K8s StatefulSet integration.
+
+    StatefulSet pods get stable ordinal names: signal-worker-safety-2 etc.
+    If WORKER_PARTITION_INDEX isn't explicitly set in the env, derive it
+    from the trailing integer of POD_NAME. Must run BEFORE Config() is
+    instantiated, since Pydantic reads os.environ at construction time.
+    """
+    import os
+    if "WORKER_PARTITION_INDEX" in os.environ:
+        return  # explicit env wins
+
+    pod_name = os.environ.get("POD_NAME", "")
+    if not pod_name:
+        return
+
+    suffix = pod_name.rsplit("-", 1)[-1]
+    if suffix.isdigit():
+        os.environ["WORKER_PARTITION_INDEX"] = suffix
+        print(f"[startup] derived WORKER_PARTITION_INDEX={suffix} from POD_NAME={pod_name}")
+
 def main() -> int:
-    args = parse_args()
+    _derive_partition_index_from_pod_name()
 
     cfg = Config()
+
+    # Start the observability server BEFORE building workers, so /healthz
+    # responds even during slow worker initialization (model loads, etc.).
+    from signal_worker.observability import start_server
+    start_server(port=cfg.observability_port)
+
+    args = parse_args()
 
     if args.specs:
         show_specs(args.worker, cfg)

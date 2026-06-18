@@ -91,7 +91,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
    │  │ for spec in lens.SPECS:        │  │           ▲
    │  │   if applies and gated:        │  │           │ read thresholds (TTL cached)
    │  │     row = pattern(span, ctx)   │  │           │ read pricing (Cost)
-   │  └────────────────────────────────┘  │           │ UPSERT watermark
+   │  └────────────────────────────────┘  │           │ UPSERT checkpoint
    └──────────────┬───────────────────────┘           │
                   │ INSERT (with dedup token)         │
                   ▼                                   │
@@ -119,7 +119,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
 
 The workers sit between ClickHouse-as-truth (spans in) and ClickHouse-as-rollup
 (metrics out). Postgres exists alongside as the "what should be" store —
-registry, configured thresholds, prices, and worker high-watermarks.
+registry, configured thresholds, prices, and worker high-checkpoints.
 
 ---
 
@@ -134,7 +134,7 @@ the **operational store** — everything that exists or should be.
 | What's wired to what (`bindings`) | What was measured (`signal_derived_metrics`) |
 | What the limits are (`*_thresholds`) | Pre-aggregated time series (`signal_aggregated_metrics`) |
 | Component pricing (`components.pricing` JSONB) | |
-| Worker watermarks (`worker_checkpoints`) | |
+| Worker checkpoints (`worker_checkpoints`) | |
 
 ### The materialized-path convention
 
@@ -337,7 +337,7 @@ One row per `(lens, partition_key)`. UPSERT'd by every worker batch.
 CREATE TABLE worker_checkpoints (
     lens          TEXT        NOT NULL,
     partition_key TEXT        NOT NULL DEFAULT 'default',
-    watermark     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
+    checkpoint     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by    TEXT,                          -- pod hostname (diagnostic)
     PRIMARY KEY (lens, partition_key)
@@ -537,7 +537,7 @@ to `endpoint` so endpoint-scoped dashboards have data.
 run_poll():
   set_ready(True)
   loop:
-    wm    = load_checkpoint()                       # PG: SELECT watermark FROM worker_checkpoints
+    wm    = load_checkpoint()                       # PG: SELECT checkpoint FROM worker_checkpoints
     spans = fetch_batch(since=wm, limit=batch)      # CH: recorded_at > wm ORDER BY recorded_at LIMIT N
     if not spans:
       sleep(poll_sec); continue
@@ -571,16 +571,16 @@ class PostgresCheckpointStore:
     PARTITION_KEY = "default"   # always 'default' until partitioned consumption lands
 
     def load(self, lens: str) -> str:
-        # SELECT watermark FROM worker_checkpoints WHERE lens=%s AND partition_key=%s
+        # SELECT checkpoint FROM worker_checkpoints WHERE lens=%s AND partition_key=%s
         # Returns '1970-01-01 00:00:00.000' if no row yet.
 
-    def save(self, lens: str, watermark: str) -> None:
-        # INSERT ... ON CONFLICT DO UPDATE SET watermark=..., updated_at=now(), updated_by=...
+    def save(self, lens: str, checkpoint: str) -> None:
+        # INSERT ... ON CONFLICT DO UPDATE SET checkpoint=..., updated_at=now(), updated_by=...
 ```
 
 Connection is opened lazily, autocommit, held for the worker's lifetime. Each
 save is one UPSERT. Save failures propagate out — the run loop dies, K8s
-restarts the pod, and `load()` returns the last successfully-saved watermark.
+restarts the pod, and `load()` returns the last successfully-saved checkpoint.
 The dedup token then prevents double-write on re-fetch (see S9.2).
 
 ---
@@ -882,7 +882,7 @@ rewinds, use the manual cleanup pattern in `infra/README.md` S "Reset and re-ini
 ### 9.3 Per-lens isolation
 
 Each lens has:
-- Its own checkpoint row in `worker_checkpoints` (independent watermark).
+- Its own checkpoint row in `worker_checkpoints` (independent checkpoint).
 - Its own Deployment (independent failure domain).
 - Its own image (independent dependency set).
 - Its own toggle cache (different thresholds).
@@ -895,7 +895,7 @@ back without touching the other lenses.
 
 | Property | Guarantee |
 |---|---|
-| Exactly-once across CH and PG | ❌ — no shared transaction. Token gives effective once-per-row in CH; PG watermark can technically lag. |
+| Exactly-once across CH and PG | ❌ — no shared transaction. Token gives effective once-per-row in CH; PG checkpoint can technically lag. |
 | Strict ordering within a lens | ❌ — each batch is processed atomically, but inter-batch ordering depends on `ORDER BY recorded_at LIMIT N` and the dedup window |
 | Span-boundary ties | ❌ — `recorded_at > wm LIMIT N` can skip rows that share the boundary timestamp if a tie spans the batch edge. Mitigated by `WORKER_BATCH = 5000`; a robust fix is `(recorded_at, span_id)` cursor pagination, deferred |
 | Multi-pod fan-out for same lens | ❌ — both pods fetch the same spans, wasting compute; the dedup token prevents data corruption but not the waste. Need partitioned consumption (S11.4) |

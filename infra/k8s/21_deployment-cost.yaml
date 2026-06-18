@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signal-worker-cost
+  namespace: signal
+  labels:
+    app: signal-worker
+    lens: cost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signal-worker
+      lens: cost
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: signal-worker
+        lens: cost
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: worker
+        image: signal-worker:cost
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef: { name: signal-worker-config }
+        - secretRef:    { name: signal-worker-secrets }
+        ports:
+        - name: metrics
+          containerPort: 8080
+        livenessProbe:
+          httpGet:  { path: /healthz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:  { path: /readyz, port: 8080 }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "100m", memory: "256Mi" }
+          limits:   { cpu: "500m", memory: "512Mi" }

@@ -19,6 +19,9 @@ from .base import BaseWorker, path_cols
 from .toggle_cache import ToggleCache
 from .utils import LRUCache
 
+from .observability import SKIPPED_AT_GATE
+
+
 log = logging.getLogger("signal.worker")
 
 
@@ -334,8 +337,12 @@ class SpecWorker(BaseWorker):
         loop — e.g. Safety pre-filling its PII cache — call this directly
         instead of process_batch() to avoid double-filtering and double-logging.
         """
+
+        slot_label = getattr(self, "_current_slot", "all")
+        SKIPPED_AT_GATE.labels(lens=self.lens, slot=slot_label).inc(skipped_at_gate)
+
         self._batch_skipped_at_spec = Counter()
- 
+
         rows = []
         for span in kept:
             rows.extend(self.compute(span))
