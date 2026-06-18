@@ -80,23 +80,24 @@ def _build_mrn_recognizer():
                 score=0.88,
             ),
             # Bare alphanumeric hospital/clinic ID (e.g. RF-203948, MGH-884721)
-            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            # Base score below threshold — only fires when a context keyword boosts it (+0.35).
+            # Without context, patterns like INV-2023 (invoice numbers) would be false positives.
             Pattern(
                 name="mrn_alpha_prefix_numeric",
                 regex=r"\b[A-Z]{2,4}-\d{4,8}\b",
-                score=0.55,
+                score=0.20,
             ),
             # Compound alphanumeric ID (e.g. HLT-9982-AX19 insurance policy)
-            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            # Same rationale — invoice numbers like INV-2023-7594 match this pattern.
             Pattern(
                 name="mrn_compound_alpha",
                 regex=r"\b[A-Z]{2,4}-\d{2,6}-[A-Z0-9]{2,6}\b",
-                score=0.55,
+                score=0.20,
             ),
             Pattern(
                 name="mrn_bare_number",
                 regex=r"\b\d{6,10}\b",
-                score=0.40,
+                score=0.20,
             ),
         ],
         context=[

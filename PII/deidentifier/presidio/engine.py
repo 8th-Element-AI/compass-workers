@@ -78,7 +78,10 @@ _HF_LABEL_MAP: Dict[str, str] = {
     "SSN": "US_SSN", "US_SSN": "US_SSN", "ZIP": "ZIP_CODE", "AGE": "AGE",
     "US_PASSPORT": "US_PASSPORT", "US_DRIVER_LICENSE": "US_DRIVER_LICENSE",
     "US_BANK_NUMBER": "US_BANK_NUMBER", "CREDIT_CARD": "CREDIT_CARD",
-    "IBAN_CODE": "IBAN_CODE", "IP_ADDRESS": "IP_ADDRESS",
+    "IBAN_CODE": "IBAN_CODE",
+    # IP_ADDRESS intentionally omitted — the NER model misclassifies decimal
+    # numbers (e.g. currency amounts) as IPs. Presidio's built-in IpRecognizer
+    # (strict 4-octet regex) handles real IP addresses reliably.
     "ORG": "ORG", "ORGANIZATION": "ORG", "PATORG": "ORG", "FINANCIAL": "ORG",
     "OTHERPHI": "NRP", "USERNAME": "NRP", "NRP": "NRP",
     "PROFESSION": "NRP", "MISC": "NRP",
