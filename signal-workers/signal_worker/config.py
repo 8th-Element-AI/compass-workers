@@ -74,66 +74,35 @@ class Config(BaseSettings):
     )
 
     signal_toxicity_batch_size: int = Field(
-      default=32,
+      default=64,
       alias="SIGNAL_TOXICITY_BATCH_SIZE"
     )
 
     # ── Toxicity — device + perf ────────────────────────────────
     signal_toxicity_device: str = Field(
-        default="cuda", alias="SIGNAL_TOXICITY_DEVICE"
+        default="cpu", alias="SIGNAL_TOXICITY_DEVICE"
     )  # "cuda" | "cpu"
     signal_toxicity_max_length: int = Field(
-        default=128, alias="SIGNAL_TOXICITY_MAX_LENGTH"
+        default=512, alias="SIGNAL_TOXICITY_MAX_LENGTH"
     )
     signal_toxicity_fp16: bool = Field(
         default=True, alias="SIGNAL_TOXICITY_FP16"
     )
 
     # ── Toxicity — model paths ─────────────────────────────────
-    # Paths can be absolute, OR relative — relatives are joined to
-    # SIGNAL_TOXICITY_MODELS_ROOT. Useful when a container mounts a
-    # PVC at /opt/models: set the root once, don't touch the four below.
-    signal_toxicity_models_root: str = Field(
-        default="./models", alias="SIGNAL_TOXICITY_MODELS_ROOT"
-    )
-    signal_toxicity_fasttext_path: str = Field(
-        default="fasttext/router_head.ftz",
-        alias="SIGNAL_TOXICITY_FASTTEXT_PATH",
-    )
     signal_toxicity_pi_path: str = Field(
-        default="transformers/prompt_injection",
+        default="prompt_injection",
         alias="SIGNAL_TOXICITY_PI_PATH",
     )
-    signal_toxicity_pi_onnx_path: str = Field(
-        default="onnx_int8/prompt_injection",
-        alias="SIGNAL_TOXICITY_PI_ONNX_PATH",
-    )
     signal_toxicity_mod_path: str = Field(
-        default="transformers/moderation",
+        default="minilm_toxic_spam",
         alias="SIGNAL_TOXICITY_MOD_PATH",
     )
 
-    # ── Toxicity — FastText routing thresholds ─────────────────
-    signal_toxicity_attack_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_ATTACK_ROUTE"
-    )
-    signal_toxicity_moderation_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_MODERATION_ROUTE"
-    )
-    signal_toxicity_fast_allow: float = Field(
-        default=0.02, alias="SIGNAL_TOXICITY_FAST_ALLOW"
-    )
-    signal_toxicity_fasttext_direct: float = Field(
-        default=0.97, alias="SIGNAL_TOXICITY_FASTTEXT_DIRECT"
-    )
-
-    # ── Toxicity — BERT review thresholds (drive 0/1 verdicts) ─
+    # ── Toxicity — review thresholds (drive 0/1 verdicts) ──────
     signal_toxicity_pi_threshold: float = Field(
         default=0.50, alias="SIGNAL_TOXICITY_PI_THRESHOLD"
     )
     signal_toxicity_harmful_threshold: float = Field(
         default=0.50, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
-    )
-    signal_toxicity_sexual_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_SEXUAL_THRESHOLD"
     )

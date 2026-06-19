@@ -50,7 +50,7 @@ class PostgresCheckpointStore:
     def _connection(self):
         if self._conn is None or self._conn.closed:
             import psycopg
-            self._conn = psycopg.connect(self.dsn, autocommit=True)
+            self._conn = psycopg.connect(self.dsn, autocommit=True, connect_timeout=10)
             log.info(
                 "[checkpoint] connected as updated_by=%s",
                 self.updated_by,

@@ -44,7 +44,6 @@ LENS = "safety"
 PII_METRICS              = {"pii_count", "pii_detected"}
 PROMPT_INJECTION_METRICS = {"prompt_injection_detected"}
 MODERATION_METRICS       = {"toxicity_detected"}
-TOXICITY_ALL_METRICS     = PROMPT_INJECTION_METRICS | MODERATION_METRICS
 
 def _spec(metric, applies, pattern, inputs, unit, window="1h",
           threshold=False, per_span=True, meta_fn=None):
@@ -72,11 +71,6 @@ def _prompt_injection_meta(span, ctx):
         "prompt_injection_score": round(score, 4),
         "triggered_models": ctx.get("triggered_models", []),
     }
-    if ctx.get("router_ft_scores"):
-        meta["routing"] = {
-            "fasttext": ctx["router_ft_scores"],
-            "rule_reasons": ctx.get("router_rule_reasons", []),
-        }
     return meta
 
 def _toxicity_meta(span, ctx):
@@ -91,11 +85,6 @@ def _toxicity_meta(span, ctx):
     }
     if ctx.get("moderation_location"):
         meta["moderation_location"] = ctx["moderation_location"]
-    if ctx.get("router_ft_scores"):
-        meta["routing"] = {
-            "fasttext": ctx["router_ft_scores"],
-            "rule_reasons": ctx.get("router_rule_reasons", []),
-        }
     return meta
 
 
@@ -114,12 +103,7 @@ SPECS = [
 # ---- text extractors ----------------------------------------------------------
 
 def _extract_input_and_output(span):
-    """PII, toxicity_router, and moderation all use this.
-
-    The router needs the union of what downstream steps want (input + output)
-    so PI (input only) and Mod (input + output) both find routing data when
-    they look up the router cache by text hash.
-    """
+    """PII and moderation use this — both inspect input + output."""
     md = parse_meta(span.get("metadata"))
     return (md.get("input"), md.get("output"))
 
@@ -151,21 +135,16 @@ class SafetyWorker(SpecWorker):
 
         self.toxicity_batch_size = cfg.signal_toxicity_batch_size
 
-        # Lazy holders. _tox is just a config + lazy model registry — its own
-        # internal .fasttext/.prompt_injection/.moderation properties load
-        # the actual weights on first access.
+        # Lazy holders — models load on first call to the relevant step.
         self._pii_engine = None
         self._tox = None
 
         # Result caches — one per analyzer.
         self._pii_cache    = LRUCache(cfg.signal_pii_cache_max)
-        self._router_cache = LRUCache(cfg.signal_toxicity_cache_max)
         self._pi_cache     = LRUCache(cfg.signal_toxicity_cache_max)
         self._mod_cache    = LRUCache(cfg.signal_toxicity_cache_max)
 
         # Step registry — the shared engine iterates these IN ORDER.
-        # toxicity_router MUST run before prompt_injection and moderation so
-        # they can read its routing decisions from the cache.
         self._steps = [
             PrefillStep(
                 name="pii",
@@ -173,13 +152,6 @@ class SafetyWorker(SpecWorker):
                 cache=self._pii_cache,
                 extract=_extract_input_and_output,
                 analyze=self._analyze_pii,
-            ),
-            PrefillStep(
-                name="toxicity_router",
-                metrics=TOXICITY_ALL_METRICS,
-                cache=self._router_cache,
-                extract=_extract_input_and_output,
-                analyze=self._analyze_router,
             ),
             PrefillStep(
                 name="prompt_injection",
@@ -208,64 +180,26 @@ class SafetyWorker(SpecWorker):
             self._pii_engine = PresidioEngine.get_instance(ner_model=self.ner_model)
         return self._pii_engine
 
-    @property
+    @property 
     def tox(self):
-        """ToxicityClassifier: config holder + lazy model registry. Constructing
-        it touches no model weights; accessing .fasttext / .prompt_injection /
-        .moderation is what loads them.
+        """SafetyClassifier: lazy-loaded on first toxicity step call.
 
-        Config comes from pydantic Settings (env-driven), not runtime.yaml.
+        Uses the package's own runtime.yaml for model paths; device,
+        max_length, and onnx_provider come from pydantic Settings (env-driven).
         """
         if self._tox is None:
-            from toxicity_observability import ToxicityClassifier
-            cfg_dict = self._build_toxicity_config()
+            from safety_observability_slim import SafetyClassifier
+            c = self.cfg
             log.info(
-                "[safety] loading ToxicityClassifier (device=%s, models_root=%s)",
-                cfg_dict["runtime"]["device"],
-                self.cfg.signal_toxicity_models_root,
+                "[safety] loading SafetyClassifier (device=%s)",
+                c.signal_toxicity_device,
             )
-            self._tox = ToxicityClassifier(config_dict=cfg_dict)
+            self._tox = SafetyClassifier(
+                device=c.signal_toxicity_device,
+                max_length=c.signal_toxicity_max_length,
+                onnx_provider="auto",
+            )
         return self._tox
-
-    def _build_toxicity_config(self):
-        """Project pydantic Settings into the dict shape ToxicityClassifier expects.
-
-        Model paths: absolute paths pass through, relative ones are joined onto
-        `signal_toxicity_models_root`. This way one env var (the root) parks the
-        whole model tree in a container, and the four individual path fields
-        rarely need to be touched.
-        """
-        from pathlib import Path
-        c = self.cfg
-        root = Path(c.signal_toxicity_models_root)
-
-        def _resolve(rel: str) -> str:
-            p = Path(rel)
-            return str(p if p.is_absolute() else root / p)
-
-        return {
-            "models": {
-                "fasttext_router":            {"local_path": _resolve(c.signal_toxicity_fasttext_path)},
-                "prompt_injection":           {"local_path": _resolve(c.signal_toxicity_pi_path)},
-                "prompt_injection_onnx_int8": {"local_path": _resolve(c.signal_toxicity_pi_onnx_path)},
-                "moderation":                 {"local_path": _resolve(c.signal_toxicity_mod_path)},
-            },
-            "thresholds": {
-                "attack_route":            c.signal_toxicity_attack_route,
-                "moderation_route":        c.signal_toxicity_moderation_route,
-                "fast_allow":              c.signal_toxicity_fast_allow,
-                "fasttext_direct":         c.signal_toxicity_fasttext_direct,
-                "prompt_injection_review": c.signal_toxicity_pi_threshold,
-                "harmful_content_review":  c.signal_toxicity_harmful_threshold,
-                "sexual_review":           c.signal_toxicity_sexual_threshold,
-            },
-            "runtime": {
-                "device":            c.signal_toxicity_device,
-                "max_length":        c.signal_toxicity_max_length,
-                "fp16_on_cuda":      c.signal_toxicity_fp16,
-                "full_scan_default": False,
-            },
-        }
 
     # ------------------------------------------------------------------
     # Step analyzers — the `analyze` callables on each PrefillStep.
@@ -277,133 +211,21 @@ class SafetyWorker(SpecWorker):
         return self.pii_engine.analyze_batch(
             texts, batch_size=self.pii_batch_size,
         )
- 
-    def _analyze_router(self, texts):
-        """FastText routing + deterministic rules, batched. One cache entry
-        per text holds the decision PI/Mod will consult.
-        """
-        from toxicity_observability.normalize import normalize
-        from toxicity_observability.deterministic import ATTACK, MODERATION, evaluate as deterministic_gate
 
-        log.info("[safety:router] FastText over %d unique texts", len(texts))
-
-        c = self.cfg
-        ft_direct = c.signal_toxicity_fasttext_direct
-
-        norms = [normalize(t) for t in texts]
-        rules = [deterministic_gate(n) for n in norms]
-        ft_results = self.tox.fasttext.predict_batch([n.detection_text for n in norms])
-
-        out = []
-        for ft, rule, norm in zip(ft_results, rules, norms):
-            ft_scores = ft["scores"]
-            run_attack = (
-                ATTACK in rule.force_route
-                or ft_scores["attack"] >= c.signal_toxicity_attack_route
-            )
-            run_moderation = (
-                MODERATION in rule.force_route
-                or ft_scores["moderation"] >= c.signal_toxicity_moderation_route
-            )
-            fast_allow = (
-                rule.allow_fast_skip
-                and ft_scores["attack"] < c.signal_toxicity_fast_allow
-                and ft_scores["moderation"] < c.signal_toxicity_fast_allow
-            )
-            out.append({
-                "ft_scores": ft_scores,
-                "model_text": norm.model_text,
-                "run_attack": run_attack,
-                "run_moderation": run_moderation,
-                "fast_allow": fast_allow,
-                "ft_direct_attack":     ft_scores["attack"]     >= ft_direct,
-                "ft_direct_moderation": ft_scores["moderation"] >= ft_direct,
-                "rule_reasons": rule.reasons,
-            })
-        return out
 
     def _analyze_prompt_injection(self, texts):
-        """PI BERT — only on texts FastText routed to attack and that didn't
-        fast-allow. The model itself is loaded lazily on first call to
-        self.tox.prompt_injection.classify_batch().
-        """
-        out = [None] * len(texts)
-        bert_indices, bert_texts = [], []
-
-        for i, t in enumerate(texts):
-            r = self._router_cache.get(self._hash(t))
-            if r is None:
-                # Shouldn't happen — router extracts a superset of what PI sees.
-                # Guard so we don't crash on edge cases.
-                out[i] = {"score": 0.0, "ran": False, "reason": "no_router"}
-                continue
-            if r["ft_direct_attack"]:
-                # FastText was confident enough; use its score, skip BERT.
-                out[i] = {"score": float(r["ft_scores"]["attack"]), "ran": False, "reason": "ft_direct"}
-            elif r["run_attack"] and not r["fast_allow"]:
-                bert_indices.append(i)
-                bert_texts.append(r["model_text"])
-            else:
-                out[i] = {"score": 0.0, "ran": False, "reason": "not_routed"}
-
-        if bert_texts:
-            log.info("[safety:pi] PI BERT over %d of %d routed texts",
-                     len(bert_texts), len(texts))
-            results = self.tox.prompt_injection.classify_batch(
-                bert_texts, batch_size=self.toxicity_batch_size,
-            )
-            for idx, res in zip(bert_indices, results):
-                out[idx] = {
-                    "score": float(res["scores"]["prompt_injection"]),
-                    "ran": True,
-                    "reason": "routed",
-                }
-        else:
-            log.info("[safety:pi] FastText cleared all %d texts; PI BERT not loaded",
-                     len(texts))
-        return out
+        """PI model — all unique input texts, batched."""
+        log.info("[safety:pi] PI model over %d texts", len(texts))
+        return self.tox.prompt_injection.classify_batch(
+            texts, batch_size=self.toxicity_batch_size,
+        )
 
     def _analyze_moderation(self, texts):
-        """Moderation BERT — only on texts FastText routed to moderation and
-        that didn't fast-allow. Lazy load on first classify_batch call.
-        """
-        out = [None] * len(texts)
-        bert_indices, bert_texts = [], []
-
-        for i, t in enumerate(texts):
-            r = self._router_cache.get(self._hash(t))
-            if r is None:
-                out[i] = {"harmful_score": 0.0, "sexual_score": 0.0, "ran": False, "reason": "no_router"}
-                continue
-            if r["ft_direct_moderation"]:
-                out[i] = {
-                    "harmful_score": float(r["ft_scores"]["moderation"]),
-                    "sexual_score":  0.0,
-                    "ran": False, "reason": "ft_direct",
-                }
-            elif r["run_moderation"] and not r["fast_allow"]:
-                bert_indices.append(i)
-                bert_texts.append(r["model_text"])
-            else:
-                out[i] = {"harmful_score": 0.0, "sexual_score": 0.0, "ran": False, "reason": "not_routed"}
-
-        if bert_texts:
-            log.info("[safety:mod] Moderation BERT over %d of %d routed texts",
-                     len(bert_texts), len(texts))
-            results = self.tox.moderation.classify_batch(
-                bert_texts, batch_size=self.toxicity_batch_size,
-            )
-            for idx, res in zip(bert_indices, results):
-                out[idx] = {
-                    "harmful_score": float(res["scores"]["harmful_content"]),
-                    "sexual_score":  float(res["scores"]["sexual"]),
-                    "ran": True,
-                    "reason": "routed",
-                }
-        else:
-            log.info("[safety:mod] FastText cleared all %d texts; Moderation BERT not loaded",
-                     len(texts))
-        return out
+        """Moderation model — all unique input+output texts, batched."""
+        log.info("[safety:mod] Moderation model over %d texts", len(texts))
+        return self.tox.moderation.classify_batch(
+            texts, batch_size=self.toxicity_batch_size,
+        )
 
     # ------------------------------------------------------------------
     # process_batch: gate -> loop over steps -> shared engine
@@ -477,9 +299,6 @@ class SafetyWorker(SpecWorker):
         else:
             pii_location = None
 
-        # ---- Router (just for meta — read by input text, the most common case) ----
-        router_in = self._router_cache.get(self._hash(input_text)) if input_text else None
-
         # ---- Prompt injection (input only) ----
         pi_in = self._pi_cache.get(self._hash(input_text)) if input_text else None
         pi_score = float(pi_in["score"]) if pi_in else 0.0
@@ -515,23 +334,18 @@ class SafetyWorker(SpecWorker):
         # are read and self.tox is never touched. But pi_score / harmful_score
         # are already 0.0 in that case, so toxicity_detected/pi_detected default
         # to 0.0 below without needing the config.
-        if router_in is not None or pi_ran or mod_ran:
+        if pi_ran or mod_ran:
             pi_threshold      = self.cfg.signal_toxicity_pi_threshold
             harmful_threshold = self.cfg.signal_toxicity_harmful_threshold
-            sexual_threshold  = self.cfg.signal_toxicity_sexual_threshold
         else:
-            pi_threshold = harmful_threshold = sexual_threshold = 0.50  # any default works; all scores are 0.0
+            pi_threshold = harmful_threshold = 0.50  # any default works; all scores are 0.0
 
         # ---- Decisions ----
-        pi_detected  = 1.0 if pi_score      >= pi_threshold       else 0.0
-        tox_detected = 1.0 if (
-            harmful_score >= harmful_threshold or sexual_score >= sexual_threshold
-        ) else 0.0
+        pi_detected  = 1.0 if pi_score    >= pi_threshold      else 0.0
+        tox_detected = 1.0 if harmful_score >= harmful_threshold else 0.0
 
         # ---- Triggered models (for meta) ----
         triggered = []
-        if router_in is not None:
-            triggered.append("fasttext_router")
         if pi_ran:
             triggered.append("prompt_injection")
         if mod_ran:
@@ -541,7 +355,7 @@ class SafetyWorker(SpecWorker):
             # PII
             "pii_count":     float(total_pii),
             "pii_detected":  1.0 if total_pii > 0 else 0.0,
-            "pii_types":     sorted(types.keys()),
+            "pii_types":     sorted(types.items()) if types else None,
             "pii_location":  pii_location,
             # Prompt injection
             "prompt_injection_detected": pi_detected,
@@ -553,8 +367,5 @@ class SafetyWorker(SpecWorker):
             "sexual_content_score":  sexual_score,
             "moderation_location":   mod_location,
             "moderation_ran":        mod_ran,
-            # Router (for meta)
-            "router_ft_scores":    (router_in["ft_scores"]     if router_in else None),
-            "router_rule_reasons": (router_in.get("rule_reasons") if router_in else None),
             "triggered_models": triggered,
         }

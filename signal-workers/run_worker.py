@@ -133,6 +133,12 @@ def show_specs(lens: str, cfg: Config) -> None:
 def main() -> int:
     args = parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     cfg = Config()
 
     if args.specs:
