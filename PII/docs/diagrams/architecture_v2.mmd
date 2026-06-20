@@ -1,0 +1,66 @@
+flowchart TD
+    subgraph entry["Entry Points"]
+        CLI["cli.py / __main__.py\n(deidentify CLI)"]
+        API["api.py\n(FastAPI server: /analyze, /analyze/batch, /analyze/plain)"]
+        SAFETY["signal_worker/lenses/safety.py\nSafetyWorker (production caller)"]
+        EVAL["eval/evaluate.py\n(IOU scoring against Kaggle PII dataset)"]
+    end
+
+    subgraph core["PresidioEngine (presidio/engine.py)"]
+        GETINST["get_instance()\nthread-safe singleton"]
+        DETECT["_detect(text)\nshared filtered-span helper"]
+        ANALYZEFN["analyze(text)\n-> AnalysisResult (aggregate counts)"]
+        DETECTFN["detect(text)\n-> list[RecognizerResult] (spans, for tooling)"]
+        ANALYZEBATCH["analyze_batch(texts)\nconcurrent ThreadPool — preferred"]
+        BATCHANALYZE["batch_analyze(texts)\nsequential"]
+    end
+
+    subgraph detectlayer["Detection layer"]
+        ANALYZER["presidio_analyzer.AnalyzerEngine"]
+        NLP["NLP backend\nregex-only | spaCy (en_core_web_sm/lg) | HF transformer"]
+        BUILTIN["Presidio built-in recognizers\n(EMAIL, PHONE, CREDIT_CARD, US_SSN, IP, IBAN...)"]
+        CUSTOM["presidio/recognizers.py: register_all()\nDATE_OF_BIRTH, MEDICAL_RECORD_NUMBER, AGE,\nZIP_CODE, MEDICAL_LICENSE(NPI), US_BANK_NUMBER,\nMEDICARE_ID(MBI), URL, ORG(spaCy NER)"]
+    end
+
+    subgraph policy["Policy / Config"]
+        CONFIG["config.py: PolicyConfig\nscore_threshold, per-entity enabled"]
+        YAML["policies/default.yaml"]
+        ENTITIES["entities.py\nEntityType enum"]
+    end
+
+    subgraph out["Output"]
+        RESULT["result.py\nAnalysisResult\n(has_pii, entity_count, entities)"]
+    end
+
+    CLI --> GETINST
+    API --> GETINST
+    SAFETY -->|"analyze_batch only"| GETINST
+    EVAL -->|"detect only\n(needs span positions)"| GETINST
+
+    GETINST --> ANALYZEBATCH
+    GETINST --> BATCHANALYZE
+    GETINST --> ANALYZEFN
+    GETINST --> DETECTFN
+
+    ANALYZEBATCH --> ANALYZEFN
+    BATCHANALYZE --> ANALYZEFN
+    ANALYZEFN --> DETECT
+    DETECTFN --> DETECT
+
+    DETECT --> ANALYZER
+
+    ANALYZER --> NLP
+    ANALYZER --> BUILTIN
+    ANALYZER --> CUSTOM
+    NLP --> CUSTOM
+
+    YAML --> CONFIG
+    CONFIG --> ENTITIES
+    CONFIG -->|"score_threshold filters results"| DETECT
+    CONFIG -->|"is_entity_enabled\nfilters which entities to search"| DETECT
+
+    ANALYZEFN --> RESULT
+
+    style SAFETY fill:#d6e9f9,stroke:#2980b9
+    style EVAL fill:#d6e9f9,stroke:#2980b9
+    style core fill:#fdf6e3,stroke:#999

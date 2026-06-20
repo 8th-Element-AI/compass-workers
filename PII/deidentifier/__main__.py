@@ -3,14 +3,9 @@ Entrypoint for `python -m deidentifier`.
 
 Examples
 --------
-Default engine (regex + spaCy):
     python -m deidentifier notes.txt
-    python -m deidentifier notes.txt --fast
-    python -m deidentifier notes.txt --strategy mask --output clean.txt
-
-Presidio engine:
-    python -m deidentifier notes.txt --engine presidio
-    python -m deidentifier notes.txt --engine presidio --format json --audit audit.json
+    python -m deidentifier notes.txt --format json
+    python -m deidentifier notes.txt --ner-model en_core_web_lg
 """
 import sys
 

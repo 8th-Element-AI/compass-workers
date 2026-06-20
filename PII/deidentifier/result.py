@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List
 
-from .audit import AuditRecord
+from .policy_evaluator import Severity, Violation
 
 
 @dataclass
@@ -15,12 +15,8 @@ class AnalysisResult:
 
 
 @dataclass
-class DeidentificationResult:
-    document_id: str
-    original_text: str
-    deidentified_text: str
-    audit_record: AuditRecord
-
-    @property
-    def entities_processed(self) -> int:
-        return self.audit_record.entities_processed
+class EvaluationResult:
+    """Severity-scored detection output — see policy_evaluator.PolicyEvaluator."""
+    violations: List[Violation]
+    max_severity: Severity
+    has_violation: bool

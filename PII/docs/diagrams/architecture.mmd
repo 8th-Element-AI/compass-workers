@@ -1,0 +1,77 @@
+flowchart TD
+    subgraph entry["Entry Points"]
+        CLI["cli.py / __main__.py\n(deidentify CLI)"]
+        API["api.py\n(FastAPI server)"]
+        SAFETY["signal_worker/lenses/safety.py\nSafetyWorker (production caller)"]
+    end
+
+    subgraph core["PresidioEngine (presidio/engine.py)"]
+        GETINST["get_instance()\nthread-safe singleton"]
+        ANALYZE["analyze(text)\ndetect only"]
+        PROCESS["process(text)\ndetect + anonymize"]
+        ANALYZEBATCH["analyze_batch(texts)\nconcurrent ThreadPool — preferred"]
+        BATCHPROCESS["batch_process / batch_analyze\nsequential (legacy)"]
+    end
+
+    subgraph detect["Detection layer"]
+        ANALYZER["presidio_analyzer.AnalyzerEngine"]
+        NLP["NLP backend\nregex-only | spaCy (en_core_web_sm/lg) | HF transformer"]
+        BUILTIN["Presidio built-in recognizers\n(EMAIL, PHONE, CREDIT_CARD, US_SSN, IP, IBAN...)"]
+        CUSTOM["presidio/recognizers.py: register_all()\nDATE_OF_BIRTH, MEDICAL_RECORD_NUMBER, AGE,\nZIP_CODE, MEDICAL_LICENSE(NPI), US_BANK_NUMBER,\nMEDICARE_ID(MBI), URL, ORG(spaCy NER)"]
+    end
+
+    subgraph policy["Policy / Config"]
+        CONFIG["config.py: PolicyConfig\ndefault_strategy, score_threshold,\nper-entity strategy + enabled"]
+        YAML["policies/default.yaml"]
+        ENTITIES["entities.py\nEntityType enum, Strategy enum\n(redact | mask | replace)"]
+    end
+
+    subgraph anon["Anonymization layer"]
+        OPERATORS["_make_operator()\nStrategy -> OperatorConfig\nredact->[X]  mask->***  replace-><X>"]
+        ANONYMIZER["presidio_anonymizer.AnonymizerEngine"]
+    end
+
+    subgraph out["Output"]
+        RESULT["result.py\nAnalysisResult / DeidentificationResult"]
+        AUDITLOG["audit.py\nAuditLogger -> AuditRecord/AuditEntry\n(type, position, score, strategy — never raw text)"]
+    end
+
+    STRAT["strategies.py\nRedact/Mask/ReplaceStrategy + Faker\n(standalone — NOT used by PresidioEngine)"]
+
+    CLI --> PROCESS
+    CLI --> ANALYZE
+    API --> GETINST
+    SAFETY -->|"analyze_batch only\n(no redaction in prod)"| GETINST
+    GETINST --> ANALYZEBATCH
+    GETINST --> ANALYZE
+    GETINST --> PROCESS
+
+    ANALYZE --> ANALYZER
+    PROCESS --> ANALYZER
+    ANALYZEBATCH --> ANALYZE
+    BATCHPROCESS --> PROCESS
+
+    ANALYZER --> NLP
+    ANALYZER --> BUILTIN
+    ANALYZER --> CUSTOM
+    NLP --> CUSTOM
+
+    YAML --> CONFIG
+    CONFIG --> ENTITIES
+    CONFIG -->|"score_threshold filters\nanalyzer_results"| ANALYZER
+    CONFIG -->|"is_entity_enabled\nfilters which entities to search"| ANALYZER
+
+    ANALYZER -->|"filtered analyzer_results"| OPERATORS
+    CONFIG -->|"get_entity_strategy"| OPERATORS
+    OPERATORS --> ANONYMIZER
+    PROCESS --> ANONYMIZER
+
+    ANONYMIZER --> RESULT
+    ANALYZER --> RESULT
+    PROCESS --> AUDITLOG
+
+    STRAT -.->|"not wired in"| OPERATORS
+
+    style STRAT fill:#f9d6d6,stroke:#c0392b
+    style SAFETY fill:#d6e9f9,stroke:#2980b9
+    style core fill:#fdf6e3,stroke:#999

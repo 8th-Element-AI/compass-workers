@@ -1,0 +1,65 @@
+flowchart TD
+    SPANS["Batch of spans\n(model_call spans w/ input/output text)"]
+
+    subgraph stage1["Stage 1 — Lens-level gate (spec.py)"]
+        GATE["filter_spans_by_gate()\n_has_any_active_metrics()\nchecks ToggleCache.active\n(scope, solution_id, endpoint, workflow_id,\nagent_id, component_id, metric)"]
+        DROP1["Span dropped\n(no active Safety metric for this path)"]
+        KEPT["kept spans"]
+    end
+
+    subgraph stage2["Stage 2 — Per-step sub-filter (PrefillStep)"]
+        SUBFILTER["_spans_needing(kept, PII_METRICS)\nPII_METRICS = pii_count, pii_detected"]
+        SKIP_PII["No span needs PII\n-> PresidioEngine never constructed\n(model stays unloaded)"]
+        NEEDPII["spans needing PII"]
+    end
+
+    subgraph stage3["Stage 3 — Extract + dedup"]
+        EXTRACT["_extract_input_and_output(span)\n-> (input_text, output_text)"]
+        HASH["_hash(text)\nsha256[:16]"]
+        CACHECHECK{"already in\n_pii_cache?"}
+        CACHED["use cached AnalysisResult"]
+        TOANALYZE["unique uncached texts"]
+    end
+
+    subgraph engine["PresidioEngine (lazy singleton)"]
+        LOAD["pii_engine property\nfirst access -> PresidioEngine.get_instance(ner_model)"]
+        CALL["analyze_batch(texts, batch_size)\nconcurrent ThreadPool"]
+    end
+
+    subgraph store["Cache + context"]
+        PUT["_pii_cache.put(hash, AnalysisResult)"]
+        CTX["build_context(span)\nreads _pii_cache for input + output"]
+        AGG["aggregate:\npii_count = in_count + out_count\npii_detected = pii_count > 0\npii_types, pii_location"]
+    end
+
+    subgraph emit["Stage 2 (compute) — per-spec exact gate"]
+        SPECGATE["compute(): exact-match gate per\n(scope, path, metric) in active set"]
+        ROW["emit derived row:\nmetric=pii_count / pii_detected, value, metric_meta"]
+    end
+
+    SPANS --> GATE
+    GATE -->|"no active metric"| DROP1
+    GATE -->|"has active metric"| KEPT
+    KEPT --> SUBFILTER
+    SUBFILTER -->|"none"| SKIP_PII
+    SUBFILTER -->|"some"| NEEDPII
+    NEEDPII --> EXTRACT
+    EXTRACT --> HASH
+    HASH --> CACHECHECK
+    CACHECHECK -->|"yes"| CACHED
+    CACHECHECK -->|"no"| TOANALYZE
+    TOANALYZE --> LOAD
+    LOAD --> CALL
+    CALL --> PUT
+    CACHED --> CTX
+    PUT --> CTX
+    CTX --> AGG
+    AGG --> SPECGATE
+    SPECGATE -->|"gate key active"| ROW
+    SPECGATE -->|"gate key not active"| DROP2["row skipped\n(_batch_skipped_at_spec)"]
+
+    style DROP1 fill:#f9d6d6,stroke:#c0392b
+    style SKIP_PII fill:#f9d6d6,stroke:#c0392b
+    style DROP2 fill:#f9d6d6,stroke:#c0392b
+    style CACHED fill:#d6f9d6,stroke:#27ae60
+    style ROW fill:#d6e9f9,stroke:#2980b9

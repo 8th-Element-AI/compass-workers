@@ -37,3 +37,7 @@ kaggle>=1.6
 #
 # Pre-cache a HuggingFace model before first use (no downloads at runtime):
 #   python -c "from transformers import pipeline; pipeline('ner', model='gravitee-io/bert-small-pii-detection', aggregation_strategy='first')"
+#
+# Download the eval dataset from Kaggle (kaggle CLI installed via the dependency above):
+#   pip install kaggle
+#   kaggle datasets download alejopaullier/pii-external-dataset -p eval/data --unzip
