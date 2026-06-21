@@ -1,0 +1,1 @@
+INVOICE INV-2023-6041 — Soylent Inc. Bill To: Acme Corp. License renewal $923.97; Hardware purchase $4,941.74. Subtotal $5,865.71. Tax (8.5%) $498.59. Total Due: $6,364.30. Due 2025-05-21.

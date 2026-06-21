@@ -30,7 +30,13 @@ class HFClassifier:
         self.model_path = model_path
         self.device = resolve_device(device)
         self.max_length = max_length
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        try:
+            # Newer transformers: explicit fix
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
+        except TypeError:
+            # Older transformers don't know the kwarg — fall back to the slow tokenizer,
+            # which uses a different regex engine and isn't affected by the Mistral bug.
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self.model.eval()
         if self.device == "cuda":
@@ -133,7 +139,13 @@ class ONNXPromptInjectionModel:
     def __init__(self, model_path: str, *, max_length: int = 128, **_: Any) -> None:
         import onnxruntime as ort
         self.max_length = max_length
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        try:
+            # Newer transformers: explicit fix
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
+        except TypeError:
+            # Older transformers don't know the kwarg — fall back to the slow tokenizer,
+            # which uses a different regex engine and isn't affected by the Mistral bug.
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
         self.session = ort.InferenceSession(
             f"{model_path}/model.onnx",
             providers=["CPUExecutionProvider"],

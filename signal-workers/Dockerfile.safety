@@ -20,11 +20,6 @@ FROM python:3.11-slim AS models
 WORKDIR /build
 ENV HF_HOME=/opt/hf-cache
 
-# Build deps for fasttext-numpy2-wheel (in case pip doesn't find a matching wheel)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY toxicity/pyproject.toml /build/toxicity/pyproject.toml
 COPY toxicity/toxicity_observability /build/toxicity/toxicity_observability
 COPY toxicity/configs /build/toxicity/configs

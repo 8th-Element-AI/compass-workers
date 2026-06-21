@@ -98,56 +98,49 @@ def _pii_meta(span, ctx):
     return meta
 
 def _prompt_injection_meta(span, ctx):
-    """Always emit — proves the pipeline ran on this span.
+    """Always emit — proves the pipeline ran.
 
     Fields:
-      prompt_injection_score : final score (0.0 if not detected / not routed)
-      pi_bert_ran            : true if PI BERT actually executed
-      pipeline_stage         : 'evaluated' if router produced FT scores,
-                               'skipped'   if no router output (toggle off,
-                                           empty input, or model load failed)
-      routing                : FastText scores + rule reasons (only when router ran)
-      triggered_models       : models that actually ran for this span
+      prompt_injection_score : final score
+      pi_bert_ran            : did PI BERT actually execute?
+      pi_decision            : 'bert' | 'rule_short_circuit' | 'no_rules_data'
+      pipeline_stage         : 'evaluated' iff rules ran on this text
+      rule_reasons           : which deterministic rules fired (if any)
     """
-    score   = float(ctx.get("prompt_injection_score", 0.0))
-    pi_ran  = bool(ctx.get("prompt_injection_ran", False))
-    router_ft = ctx.get("router_ft_scores")
+    score        = float(ctx.get("prompt_injection_score", 0.0))
+    pi_ran       = bool(ctx.get("prompt_injection_ran", False))
+    pi_reason    = ctx.get("prompt_injection_reason", "no_data")
+    rules_eval   = bool(ctx.get("rules_evaluated", False))
 
     meta = {
         "prompt_injection_score": round(score, 4),
         "pi_bert_ran":            pi_ran,
+        "pi_decision":            pi_reason,
         "triggered_models":       ctx.get("triggered_models", []),
-        "pipeline_stage":         "evaluated" if router_ft is not None else "skipped",
+        "pipeline_stage":         "evaluated" if rules_eval else "skipped",
     }
-    if router_ft is not None:
-        meta["routing"] = {
-            "fasttext":     {k: round(v, 4) for k, v in router_ft.items()},
-            "rule_reasons": ctx.get("router_rule_reasons") or [],
-        }
+    if ctx.get("rule_reasons"):
+        meta["rule_reasons"] = ctx["rule_reasons"]
     return meta
 
 def _toxicity_meta(span, ctx):
-    """Always emit — proves the pipeline ran on this span. Same shape pattern
-    as _prompt_injection_meta."""
-    harmful = float(ctx.get("harmful_content_score", 0.0))
-    sexual  = float(ctx.get("sexual_content_score", 0.0))
-    mod_ran = bool(ctx.get("moderation_ran", False))
-    router_ft = ctx.get("router_ft_scores")
+    """Always emit — proves the pipeline ran. Same shape pattern as _prompt_injection_meta."""
+    harmful    = float(ctx.get("harmful_content_score", 0.0))
+    mod_ran    = bool(ctx.get("moderation_ran", False))
+    mod_reason = ctx.get("moderation_reason", "no_data")
+    rules_eval = bool(ctx.get("rules_evaluated", False))
 
     meta = {
         "harmful_content_score": round(harmful, 4),
-        "sexual_content_score":  round(sexual, 4),
         "moderation_bert_ran":   mod_ran,
+        "moderation_decision":   mod_reason,
         "triggered_models":      ctx.get("triggered_models", []),
-        "pipeline_stage":        "evaluated" if router_ft is not None else "skipped",
+        "pipeline_stage":        "evaluated" if rules_eval else "skipped",
     }
     if ctx.get("moderation_location"):
         meta["moderation_location"] = ctx["moderation_location"]
-    if router_ft is not None:
-        meta["routing"] = {
-            "fasttext":     {k: round(v, 4) for k, v in router_ft.items()},
-            "rule_reasons": ctx.get("router_rule_reasons") or [],
-        }
+    if ctx.get("rule_reasons"):
+        meta["rule_reasons"] = ctx["rule_reasons"]
     return meta
 
 
@@ -214,9 +207,7 @@ class SafetyWorker(SpecWorker):
         self._pi_cache     = LRUCache(cfg.signal_toxicity_cache_max)
         self._mod_cache    = LRUCache(cfg.signal_toxicity_cache_max)
 
-        # Step registry — the shared engine iterates these IN ORDER.
-        # toxicity_router MUST run before prompt_injection and moderation so
-        # they can read its routing decisions from the cache.
+
         self._steps = [
             PrefillStep(
                 name="pii",
@@ -226,7 +217,7 @@ class SafetyWorker(SpecWorker):
                 analyze=self._analyze_pii,
             ),
             PrefillStep(
-                name="toxicity_router",
+                name="toxicity_rules",
                 metrics=TOXICITY_ALL_METRICS,
                 cache=self._router_cache,
                 extract=_extract_input_and_output,
@@ -298,19 +289,13 @@ class SafetyWorker(SpecWorker):
 
         return {
             "models": {
-                "fasttext_router":            {"local_path": _resolve(c.signal_toxicity_fasttext_path)},
                 "prompt_injection":           {"local_path": _resolve(c.signal_toxicity_pi_path)},
                 "prompt_injection_onnx_int8": {"local_path": _resolve(c.signal_toxicity_pi_onnx_path)},
                 "moderation":                 {"local_path": _resolve(c.signal_toxicity_mod_path)},
             },
             "thresholds": {
-                "attack_route":            c.signal_toxicity_attack_route,
-                "moderation_route":        c.signal_toxicity_moderation_route,
-                "fast_allow":              c.signal_toxicity_fast_allow,
-                "fasttext_direct":         c.signal_toxicity_fasttext_direct,
                 "prompt_injection_review": c.signal_toxicity_pi_threshold,
                 "harmful_content_review":  c.signal_toxicity_harmful_threshold,
-                "sexual_review":           c.signal_toxicity_sexual_threshold,
             },
             "runtime": {
                 "device":            c.signal_toxicity_device,
@@ -332,46 +317,27 @@ class SafetyWorker(SpecWorker):
         )
  
     def _analyze_router(self, texts):
-        """FastText routing + deterministic rules, batched. One cache entry
-        per text holds the decision PI/Mod will consult.
+        """"Deterministic rules only — FastText removed. Cache entry holds the
+        gate result PI/Mod will consult to decide short-circuit vs run BERT.
+
+        Keeping the step name 'router' for log/cache continuity; semantically
+        this is now 'rules + normalization'.
         """
         from toxicity_observability.normalize import normalize
-        from toxicity_observability.deterministic import ATTACK, MODERATION, evaluate as deterministic_gate
+        from toxicity_observability.deterministic import evaluate as deterministic_gate
+        import toxicity_observability.constants as TC
 
-        log.info("[safety:router] FastText over %d unique texts", len(texts))
-
-        c = self.cfg
-        ft_direct = c.signal_toxicity_fasttext_direct
-
-        norms = [normalize(t) for t in texts]
-        rules = [deterministic_gate(n) for n in norms]
-        ft_results = self.tox.fasttext.predict_batch([n.detection_text for n in norms])
+        log.info("[safety:rules] evaluating %d unique texts", len(texts))
 
         out = []
-        for ft, rule, norm in zip(ft_results, rules, norms):
-            ft_scores = ft["scores"]
-            run_attack = (
-                ATTACK in rule.force_route
-                or ft_scores["attack"] >= c.signal_toxicity_attack_route
-            )
-            run_moderation = (
-                MODERATION in rule.force_route
-                or ft_scores["moderation"] >= c.signal_toxicity_moderation_route
-            )
-            fast_allow = (
-                rule.allow_fast_skip
-                and ft_scores["attack"] < c.signal_toxicity_fast_allow
-                and ft_scores["moderation"] < c.signal_toxicity_fast_allow
-            )
+        for t in texts:
+            norm = normalize(t)
+            rules = deterministic_gate(norm)
             out.append({
-                "ft_scores": ft_scores,
-                "model_text": norm.model_text,
-                "run_attack": run_attack,
-                "run_moderation": run_moderation,
-                "fast_allow": fast_allow,
-                "ft_direct_attack":     ft_scores["attack"]     >= ft_direct,
-                "ft_direct_moderation": ft_scores["moderation"] >= ft_direct,
-                "rule_reasons": rule.reasons,
+                "model_text":      norm.model_text,
+                "rule_reasons":    rules.reasons,
+                "pi_forced":       TC.PROMPT_INJECTION in rules.force_label,
+                "harmful_forced":  TC.HARMFUL_CONTENT  in rules.force_label,
             })
         return out
 
@@ -386,39 +352,36 @@ class SafetyWorker(SpecWorker):
         for i, t in enumerate(texts):
             r = self._router_cache.get(self._hash(t))
             if r is None:
-                # Shouldn't happen — router extracts a superset of what PI sees.
-                # Guard so we don't crash on edge cases.
-                out[i] = {"score": 0.0, "ran": False, "reason": "no_router"}
+                out[i] = {"score": 0.0, "ran": False, "reason": "no_rules_data"}
                 continue
-            if r["ft_direct_attack"]:
-                # FastText was confident enough; use its score, skip BERT.
-                out[i] = {"score": float(r["ft_scores"]["attack"]), "ran": False, "reason": "ft_direct"}
-            elif r["run_attack"] and not r["fast_allow"]:
+            if r["pi_forced"]:
+                out[i] = {"score": 1.0, "ran": False, "reason": "rule_short_circuit"}
+            else:
                 bert_indices.append(i)
                 bert_texts.append(r["model_text"])
-            else:
-                out[i] = {"score": 0.0, "ran": False, "reason": "not_routed"}
 
         if bert_texts:
-            log.info("[safety:pi] PI BERT over %d of %d routed texts",
-                     len(bert_texts), len(texts))
+            log.info("[safety:pi] PI BERT over %d texts", len(bert_texts))
             results = self.tox.prompt_injection.classify_batch(
                 bert_texts, batch_size=self.toxicity_batch_size,
             )
             for idx, res in zip(bert_indices, results):
                 out[idx] = {
-                    "score": float(res["scores"]["prompt_injection"]),
-                    "ran": True,
-                    "reason": "routed",
+                    "score":  float(res["scores"]["prompt_injection"]),   # ← fixed
+                    "ran":    True,
+                    "reason": "bert",
                 }
-        else:
-            log.info("[safety:pi] FastText cleared all %d texts; PI BERT not loaded",
-                     len(texts))
         return out
 
     def _analyze_moderation(self, texts):
-        """Moderation BERT — only on texts FastText routed to moderation and
-        that didn't fast-allow. Lazy load on first classify_batch call.
+        """Moderation BERT runs on every text that didn't trigger harmful/sexual
+        rules. When a rule fires, the corresponding sub-label is set to 1.0
+        directly and BERT is skipped.
+
+        Note: if only ONE of {harmful, sexual} is forced, BERT is still skipped —
+        we treat the rule as definitive for that text. Trade-off: we miss any
+        BERT signal on the OTHER sub-label. Acceptable for observability since
+        toxicity_detected = (harmful OR sexual) >= threshold either way.
         """
         out = [None] * len(texts)
         bert_indices, bert_texts = [], []
@@ -426,36 +389,30 @@ class SafetyWorker(SpecWorker):
         for i, t in enumerate(texts):
             r = self._router_cache.get(self._hash(t))
             if r is None:
-                out[i] = {"harmful_score": 0.0, "sexual_score": 0.0, "ran": False, "reason": "no_router"}
+                out[i] = {"harmful": 0.0,"ran": False, "reason": "no_rules_data"}
                 continue
-            if r["ft_direct_moderation"]:
+            if r["harmful_forced"]:
                 out[i] = {
-                    "harmful_score": float(r["ft_scores"]["moderation"]),
-                    "sexual_score":  0.0,
-                    "ran": False, "reason": "ft_direct",
+                    "harmful": 1.0 if r["harmful_forced"] else 0.0,
+                    "ran":     False,
+                    "reason":  "rule_short_circuit",
                 }
-            elif r["run_moderation"] and not r["fast_allow"]:
+            else:
                 bert_indices.append(i)
                 bert_texts.append(r["model_text"])
-            else:
-                out[i] = {"harmful_score": 0.0, "sexual_score": 0.0, "ran": False, "reason": "not_routed"}
 
         if bert_texts:
-            log.info("[safety:mod] Moderation BERT over %d of %d routed texts",
-                     len(bert_texts), len(texts))
+            log.info("[safety:mod] Moderation BERT over %d texts", len(bert_texts))
             results = self.tox.moderation.classify_batch(
                 bert_texts, batch_size=self.toxicity_batch_size,
             )
             for idx, res in zip(bert_indices, results):
                 out[idx] = {
-                    "harmful_score": float(res["scores"]["harmful_content"]),
-                    "sexual_score":  float(res["scores"]["sexual"]),
-                    "ran": True,
-                    "reason": "routed",
+                    "harmful": float(res["scores"]["harmful_content"]),
+                    "ran":     True,
+                    "reason":  "bert",
                 }
-        else:
-            log.info("[safety:mod] FastText cleared all %d texts; Moderation BERT not loaded",
-                     len(texts))
+
         return out
 
     # ------------------------------------------------------------------
@@ -522,7 +479,6 @@ class SafetyWorker(SpecWorker):
             return p if p.is_absolute() else root / p
 
         tox_artifacts = [
-            ("fasttext_router",        _resolve(c.signal_toxicity_fasttext_path),  "file",     True),
             ("prompt_injection",       _resolve(c.signal_toxicity_pi_path),        "dir",      True),
             ("prompt_injection_onnx",  _resolve(c.signal_toxicity_pi_onnx_path),   "dir",      False),  # CPU optimization, optional
             ("moderation",             _resolve(c.signal_toxicity_mod_path),       "dir",      True),
@@ -642,31 +598,34 @@ class SafetyWorker(SpecWorker):
         pi_in = self._pi_cache.get(self._hash(input_text)) if input_text else None
         pi_score = float(pi_in["score"]) if pi_in else 0.0
         pi_ran   = bool(pi_in and pi_in.get("ran"))
+        pi_reason = (pi_in.get("reason") if pi_in else "no_data")
 
         # ---- Moderation (input AND output, max per dimension) ----
         mod_in  = self._mod_cache.get(self._hash(input_text))  if input_text  else None
         mod_out = self._mod_cache.get(self._hash(output_text)) if output_text else None
 
-        harmful_in  = float(mod_in["harmful_score"])  if mod_in  else 0.0
-        harmful_out = float(mod_out["harmful_score"]) if mod_out else 0.0
-        sexual_in   = float(mod_in["sexual_score"])   if mod_in  else 0.0
-        sexual_out  = float(mod_out["sexual_score"])  if mod_out else 0.0
+        harmful_in  = float(mod_in["harmful"])  if mod_in  else 0.0
+        harmful_out = float(mod_out["harmful"]) if mod_out else 0.0
 
         harmful_score = max(harmful_in, harmful_out)
-        sexual_score  = max(sexual_in,  sexual_out)
 
         mod_ran = bool((mod_in and mod_in.get("ran")) or (mod_out and mod_out.get("ran")))
 
-        side_in  = harmful_in  > 0.0 or sexual_in  > 0.0
-        side_out = harmful_out > 0.0 or sexual_out > 0.0
-        if side_in and side_out:
-            mod_location = "both"
-        elif side_in:
+        # Where did the highest score come from?
+        mod_location = None
+        if mod_in and (mod_in["harmful"] > 0):
             mod_location = "input"
-        elif side_out:
-            mod_location = "output"
-        else:
-            mod_location = None
+        if mod_out and (mod_out["harmful"] > 0):
+            mod_location = "both" if mod_location else "output"
+
+        def _pick_reason(*reasons):
+            priority = {"bert": 3, "rule_short_circuit": 2, "no_rules_data": 1, "no_data": 0}
+            return max(reasons, key=lambda r: priority.get(r, 0))
+        
+        mod_reason = _pick_reason(
+            mod_in.get("reason")  if mod_in  else "no_data",
+            mod_out.get("reason") if mod_out else "no_data",
+        )
 
         # ---- Thresholds (lazy — touches self.tox only if any toxicity metric ran) ----
         # If no toxicity step ran for this span, none of the toxicity ctx fields
@@ -676,20 +635,19 @@ class SafetyWorker(SpecWorker):
         if router_in is not None or pi_ran or mod_ran:
             pi_threshold      = self.cfg.signal_toxicity_pi_threshold
             harmful_threshold = self.cfg.signal_toxicity_harmful_threshold
-            sexual_threshold  = self.cfg.signal_toxicity_sexual_threshold
         else:
-            pi_threshold = harmful_threshold = sexual_threshold = 0.50  # any default works; all scores are 0.0
+            pi_threshold = harmful_threshold = 0.50  # any default works; all scores are 0.0
 
         # ---- Decisions ----
         pi_detected  = 1.0 if pi_score      >= pi_threshold       else 0.0
         tox_detected = 1.0 if (
-            harmful_score >= harmful_threshold or sexual_score >= sexual_threshold
+            harmful_score >= harmful_threshold
         ) else 0.0
 
         # ---- Triggered models (for meta) ----
         triggered = []
         if router_in is not None:
-            triggered.append("fasttext_router")
+            triggered.append("deterministic_rules")
         if pi_ran:
             triggered.append("prompt_injection")
         if mod_ran:
@@ -709,14 +667,15 @@ class SafetyWorker(SpecWorker):
             "prompt_injection_detected": pi_detected,
             "prompt_injection_score":    pi_score,
             "prompt_injection_ran":      pi_ran,
+            "prompt_injection_reason":   pi_reason,
             # Toxicity (moderation)
             "toxicity_detected":     tox_detected,
             "harmful_content_score": harmful_score,
-            "sexual_content_score":  sexual_score,
             "moderation_location":   mod_location,
             "moderation_ran":        mod_ran,
+            "moderation_reason":     mod_reason,
             # Router (for meta)
-            "router_ft_scores":    (router_in["ft_scores"]     if router_in else None),
             "router_rule_reasons": (router_in.get("rule_reasons") if router_in else None),
+            "rules_evaluated":  router_in is not None,
             "triggered_models": triggered,
         }

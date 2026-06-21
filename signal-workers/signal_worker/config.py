@@ -116,10 +116,6 @@ class Config(BaseSettings):
     signal_toxicity_models_root: str = Field(
         default="./models", alias="SIGNAL_TOXICITY_MODELS_ROOT"
     )
-    signal_toxicity_fasttext_path: str = Field(
-        default="fasttext/router_head.ftz",
-        alias="SIGNAL_TOXICITY_FASTTEXT_PATH",
-    )
     signal_toxicity_pi_path: str = Field(
         default="transformers/prompt_injection",
         alias="SIGNAL_TOXICITY_PI_PATH",
@@ -133,27 +129,10 @@ class Config(BaseSettings):
         alias="SIGNAL_TOXICITY_MOD_PATH",
     )
 
-    # ── Toxicity — FastText routing thresholds ─────────────────
-    signal_toxicity_attack_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_ATTACK_ROUTE"
-    )
-    signal_toxicity_moderation_route: float = Field(
-        default=0.05, alias="SIGNAL_TOXICITY_MODERATION_ROUTE"
-    )
-    signal_toxicity_fast_allow: float = Field(
-        default=0.02, alias="SIGNAL_TOXICITY_FAST_ALLOW"
-    )
-    signal_toxicity_fasttext_direct: float = Field(
-        default=0.97, alias="SIGNAL_TOXICITY_FASTTEXT_DIRECT"
-    )
-
     # ── Toxicity — BERT review thresholds (drive 0/1 verdicts) ─
     signal_toxicity_pi_threshold: float = Field(
         default=0.50, alias="SIGNAL_TOXICITY_PI_THRESHOLD"
     )
     signal_toxicity_harmful_threshold: float = Field(
         default=0.50, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
-    )
-    signal_toxicity_sexual_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_SEXUAL_THRESHOLD"
     )
