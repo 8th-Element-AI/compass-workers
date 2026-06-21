@@ -487,7 +487,7 @@ All configuration is environment-driven via `signal_worker/config.py` (Pydantic 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | HuggingFace model id (pre-cached in image) |
-| `SIGNAL_PII_BATCH` | `4` | ThreadPoolExecutor width for `analyze_batch` |
+| `SIGNAL_PII_BATCH_SIZE` | `4` | ThreadPoolExecutor width for `analyze_batch` |
 | `SIGNAL_PII_CACHE_MAX` | `20000` | Per-worker content cache |
 
 ### 7.5 Observability

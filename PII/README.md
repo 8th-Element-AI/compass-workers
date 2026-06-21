@@ -507,7 +507,7 @@ Linear-ish up to physical core count, then plateaus.
 | 8 | 18 |
 | 16 | 21 |
 
-The Safety worker uses `batch_size=4` by default (`SIGNAL_PII_BATCH=4`).
+The Safety worker uses `batch_size=4` by default (`SIGNAL_PII_BATCH_SIZE=4`).
 
 ### Running the benchmark yourself
 
@@ -533,7 +533,7 @@ from deidentifier import PresidioEngine
 
 engine = PresidioEngine.get_instance(ner_model=os.environ["SIGNAL_PII_NER_MODEL"])
 results = engine.analyze_batch(unique_texts,
-                               batch_size=int(os.environ["SIGNAL_PII_BATCH"]))
+                               batch_size=int(os.environ["SIGNAL_PII_BATCH_SIZE"]))
 ```
 
 Each `AnalysisResult` carries:
@@ -551,7 +551,7 @@ Relevant Signal env vars:
 | Env var | Default | What it does |
 |---|---|---|
 | `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | Picks the NER model |
-| `SIGNAL_PII_BATCH` | `4` | ThreadPool width for `analyze_batch` |
+| `SIGNAL_PII_BATCH_SIZE` | `4` | ThreadPool width for `analyze_batch` |
 | `SIGNAL_PII_CACHE_MAX` | `20000` | Per-worker LRU on content hashes |
 
 The Safety Docker image pre-caches the default model during build:
