@@ -102,8 +102,16 @@ class Config(BaseSettings):
     signal_toxicity_device: str = Field(
         default="cuda", alias="SIGNAL_TOXICITY_DEVICE"
     )  # "cuda" | "cpu"
+ 
+    # ── Toxicity — ONNX provider for the MiniLM moderation model ────
+    # "auto" (prefer CUDA when onnxruntime-gpu present, else CPU),
+    # "cpu", or "cuda".
+    signal_toxicity_onnx_provider: str = Field(
+        default="auto", alias="SIGNAL_TOXICITY_ONNX_PROVIDER"
+    )
+ 
     signal_toxicity_max_length: int = Field(
-        default=128, alias="SIGNAL_TOXICITY_MAX_LENGTH"
+        default=512, alias="SIGNAL_TOXICITY_MAX_LENGTH"
     )
     signal_toxicity_fp16: bool = Field(
         default=True, alias="SIGNAL_TOXICITY_FP16"
@@ -117,22 +125,18 @@ class Config(BaseSettings):
         default="./models", alias="SIGNAL_TOXICITY_MODELS_ROOT"
     )
     signal_toxicity_pi_path: str = Field(
-        default="transformers/prompt_injection",
+        default="prompt_injection",
         alias="SIGNAL_TOXICITY_PI_PATH",
     )
-    signal_toxicity_pi_onnx_path: str = Field(
-        default="onnx_int8/prompt_injection",
-        alias="SIGNAL_TOXICITY_PI_ONNX_PATH",
-    )
     signal_toxicity_mod_path: str = Field(
-        default="transformers/moderation",
+        default="minilm_toxic_spam",
         alias="SIGNAL_TOXICITY_MOD_PATH",
     )
-
-    # ── Toxicity — BERT review thresholds (drive 0/1 verdicts) ─
+ 
+    # ── Toxicity — review thresholds (drive 0/1 verdicts) ─────
     signal_toxicity_pi_threshold: float = Field(
         default=0.50, alias="SIGNAL_TOXICITY_PI_THRESHOLD"
     )
     signal_toxicity_harmful_threshold: float = Field(
-        default=0.50, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
+        default=0.83, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
     )

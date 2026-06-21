@@ -1,26 +1,19 @@
 models:
   prompt_injection:
-    # Replace with your fine-tuned/quantized prompt-injection repo if uploaded.
-    repo_id: "Krishagarwal314/safety-prompt-injection"
-    local_path: "models/transformers/prompt_injection"
-
-  prompt_injection_onnx_int8:
-    # Optional artifact for deployment experiments; runtime uses prompt_injection above by default.
-    repo_id: "Krishagarwal314/safety-prompt-injection-onnx-int8"
-    local_path: "models/onnx_int8/prompt_injection"
+    repo_id:    "Krishagarwal314/safety-prompt-injection"
+    local_path: "models/prompt_injection"
 
   moderation:
-    # Replace with your fine-tuned 2-label Koala merged moderation repo.
-    repo_id: "Krishagarwal314/safety-moderation-2head"
-    local_path: "models/transformers/moderation"
+    repo_id:    "navodPeiris/minilm-toxic-spam-classifier"
+    local_path: "models/minilm_toxic_spam"
 
 thresholds:
-  # BERT score thresholds for observability counters.
+  # Score thresholds above which a label is emitted.
   prompt_injection_review: 0.50
-  harmful_content_review: 0.50
+  harmful_content_review:  0.83
 
 runtime:
-  device: "cuda"
-  max_length: 128
-  fp16_on_cuda: true
-  full_scan_default: false
+  device:        "cuda"      # "cpu" or "cuda" — controls the PyTorch PI model
+  onnx_provider: "auto"      # "auto" | "cpu" | "cuda" — controls the MiniLM ONNX model
+  max_length:    512
+  fp16_on_cuda:  true        # halve PI GPU memory; ignored on CPU

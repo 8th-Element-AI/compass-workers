@@ -1,172 +1,135 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Any
 
 from . import constants as C
 from .config import load_config, resolve_path
-from .deterministic import ATTACK, MODERATION, evaluate as deterministic_gate
-from .models import ModerationModel, ONNXPromptInjectionModel, PromptInjectionModel, resolve_device
-from .normalize import normalize
+from .models import MiniLMToxicSpamONNXModel, PromptInjectionModel, resolve_device
 
 
 class ToxicityClassifier:
-    """ENd-to-end toxicity classifier.
-    
-    Models are loaded lazily - accessing `.fasttext`, `.prompt_injection`, or
-    `.moderation` triggers a one-time load of that model only. Callers that
-    only need one model (e.g. the saftey lens worker, which drives routing
-    itself) can read individual properties without paying for the others.
+    """End-to-end toxicity classifier.
+
+    Pipeline:
+      1. Validate the text is a non-empty string.
+      2. Run the prompt-injection model (DeBERTa, PyTorch).
+      3. Run the moderation model (MiniLM toxic/spam, ONNX).
+      4. Emit labels for scores >= review threshold.
+
+    Both models run on every call.
+
+    Lazy loading:
+      `prompt_injection` and `moderation` are properties. The underlying
+      model weights are loaded on first access. A worker that only ever
+      needs one of them never instantiates the other.
     """
 
-    
     def __init__(
         self,
         config_path: str | None = None,
         *,
         config_dict: dict | None = None,
+        device: str | None = None,
+        onnx_provider: str | None = None,
+        max_length: int | None = None,
     ) -> None:
-        """Initialize with either a config file path or a pre-built dict.
+        """Initialize from a YAML file or a pre-built dict.
 
         Precedence:
-          * `config_dict` if provided (used by signal-workers, which builds
-            it from env-driven pydantic Settings),
-          * else `load_config(config_path)` — yaml file, default for CLI use.
+          * `config_dict` if provided (signal-workers builds it from env-driven
+            pydantic Settings),
+          * else `load_config(config_path)` (yaml file, default for CLI).
 
-        The internal `self.config` shape is identical either way, so
-        downstream code (`classify`, the lazy model properties) is unchanged.
+        The keyword overrides (`device`, `onnx_provider`, `max_length`) are
+        applied on top of whichever config is used.
         """
         if config_dict is not None:
             self.config = dict(config_dict)
         else:
             self.config = load_config(config_path)
-            
-        runtime = self.config.get("runtime", {})
+
+        runtime = self.config.setdefault("runtime", {})
+        if device is not None:
+            runtime["device"] = device
+        if onnx_provider is not None:
+            runtime["onnx_provider"] = onnx_provider
+        if max_length is not None:
+            runtime["max_length"] = max_length
+
         self.device = resolve_device(runtime.get("device", "cuda"))
-        self.max_length = int(runtime.get("max_length", 128))
+        self.max_length = int(runtime.get("max_length", 512))
+        self.onnx_provider = runtime.get("onnx_provider", "auto")
         self.fp16_on_cuda = bool(runtime.get("fp16_on_cuda", True))
         self._models_cfg = self.config["models"]
 
-        # Lazy slots - None until the corresponding property is read.
-        self._prompt_injection: PromptInjectionModel | ONNXPromptInjectionModel | None = None
-        self._moderation:       ModerationModel | None = None
+        # Lazy slots — None until the property is read.
+        self._prompt_injection: PromptInjectionModel | None = None
+        self._moderation: MiniLMToxicSpamONNXModel | None = None
 
+    # ----- lazy model properties --------------------------------------
     @property
-    def _common_kwargs(self) -> dict[str, Any]:
-        return {
-            "device": self.device,
-            "max_length": self.max_length,
-            "fp16_on_cuda": self.fp16_on_cuda,
-        }
-        
-    @property
-    def prompt_injection(self):
+    def prompt_injection(self) -> PromptInjectionModel:
         if self._prompt_injection is None:
-            # CPU-only and ONNX variant available → use it (faster on CPU)
-            if self.device == "cpu" and "prompt_injection_onnx_int8" in self._models_cfg:
-                onnx_path = resolve_path(self._models_cfg["prompt_injection_onnx_int8"]["local_path"])
-                if Path(onnx_path).exists():
-                    self._prompt_injection = ONNXPromptInjectionModel(
-                        model_path=onnx_path, max_length=self.max_length,
-                    )
-                    return self._prompt_injection
             self._prompt_injection = PromptInjectionModel(
                 str(resolve_path(self._models_cfg["prompt_injection"]["local_path"])),
-                **self._common_kwargs,
+                device=self.device,
+                max_length=self.max_length,
+                fp16_on_cuda=self.fp16_on_cuda,
             )
         return self._prompt_injection
 
     @property
-    def moderation(self) -> ModerationModel:
+    def moderation(self) -> MiniLMToxicSpamONNXModel:
         if self._moderation is None:
-            self._moderation = ModerationModel(
+            self._moderation = MiniLMToxicSpamONNXModel(
                 str(resolve_path(self._models_cfg["moderation"]["local_path"])),
-                **self._common_kwargs,
+                max_length=self.max_length,
+                onnx_provider=self.onnx_provider,
             )
         return self._moderation
 
-    def classify(self, text: str, *, full_scan: bool | None = None, include_raw: bool = False) -> dict[str, Any]:
-        """Classify a single text.
-
-        Pipeline (FastText removed):
-          1. Normalize.
-          2. Deterministic rules. If a rule fires for a label, that label's
-             score is set to 1.0 and the corresponding BERT is skipped.
-          3. For any label the rules did NOT force, run the corresponding
-             BERT and use its score.
-          4. Emit labels for scores >= review threshold.
-
-        full_scan=True bypasses rule short-circuits — every BERT runs
-        unconditionally. Useful for evaluation / debugging.
-        """
+    # ----- classify ---------------------------------------------------
+    def classify(self, text: str, *, include_raw: bool = False) -> dict[str, Any]:
+        """Run both models on `text`, return labels + scores."""
         started = time.time()
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
-        
+
+        prompt = self.prompt_injection.classify(text)
+        moderation = self.moderation.classify(text)
         thresholds = self.config["thresholds"]
-        if full_scan is None:
-            full_scan = self.config.get("runtime", {}).get("full_scan_default", False)
 
-        norm = normalize(text)
-        rules = deterministic_gate(norm)
-
-        scores: dict[str, float] = {label: 0.0 for label in C.PUBLIC_LABELS}
-        triggered: list[str] = []
-        skipped: list[str] = []
-        raw: dict[str, Any] = {
-            "rules": {
-                "routes":  sorted(rules.force_route),
-                "labels":  sorted(rules.force_label),
-                "reasons": rules.reasons,
-            }
+        scores: dict[str, float] = {
+            C.PROMPT_INJECTION: prompt["scores"][C.PROMPT_INJECTION],
+            C.HARMFUL_CONTENT:  moderation["scores"][C.HARMFUL_CONTENT],
         }
 
-        # -------- Prompt-injection decision --------
-        pi_forced = (C.PROMPT_INJECTION in rules.force_label) and not full_scan
-        if pi_forced:
-            scores[C.PROMPT_INJECTION] = 1.0
-            skipped.append("prompt_injection")
-        else:
-            pi = self.prompt_injection.classify(norm.model_text)
-            scores[C.PROMPT_INJECTION] = pi["scores"][C.PROMPT_INJECTION]
-            triggered.append("prompt_injection")
-            if include_raw:
-                raw["prompt_injection"] = pi
-
-        # -------- Moderation decision --------
-        harmful_forced = (C.HARMFUL_CONTENT in rules.force_label) and not full_scan
-
-        if harmful_forced:
-            # Set the forced labels to 1.0.
-            scores[C.HARMFUL_CONTENT] = 1.0
-            skipped.append("moderation")
-        else:
-            mod = self.moderation.classify(norm.model_text)
-            scores[C.HARMFUL_CONTENT] = mod["scores"][C.HARMFUL_CONTENT]
-            triggered.append("moderation")
-            if include_raw:
-                raw["moderation"] = mod
-
-        # -------- Labels above review threshold --------
         labels: list[str] = []
-        for label, key in [
-            (C.PROMPT_INJECTION, "prompt_injection_review"),
-            (C.HARMFUL_CONTENT,  "harmful_content_review"),
-        ]:
-            if scores[label] >= thresholds[key]:
-                labels.append(label)
+        if scores[C.PROMPT_INJECTION] >= thresholds["prompt_injection_review"]:
+            labels.append(C.PROMPT_INJECTION)
+        if scores[C.HARMFUL_CONTENT] >= thresholds["harmful_content_review"]:
+            labels.append(C.HARMFUL_CONTENT)
 
-        return {
-            "labels":            labels,
-            "scores":            scores,
-            "triggered_models":  triggered,
-            "skipped_models":    skipped,
-            "rules": {
-                "routes":  sorted(rules.force_route),
-                "labels":  sorted(rules.force_label),
-                "reasons": rules.reasons,
+        result: dict[str, Any] = {
+            "labels": labels,
+            "scores": {k: round(v, 4) for k, v in scores.items()},
+            "triggered_models": ["prompt_injection", "moderation"],
+            "runtime": {
+                "device": self.device,
+                "onnx_provider": self.onnx_provider,
+                "onnx_providers_active": moderation["raw"]["providers"],
+                "max_length": self.max_length,
             },
             "latency_ms": round((time.time() - started) * 1000, 2),
-            "raw": raw if include_raw else None,
+            "model_latency_ms": {
+                "prompt_injection": prompt["latency_ms"],
+                "moderation":       moderation["latency_ms"],
+            },
         }
+        if include_raw:
+            result["raw"] = {
+                "prompt_injection": prompt["raw"],
+                "moderation":       moderation["raw"],
+            }
+        return result

@@ -1,42 +1,95 @@
+"""Model adapters.
+
+Two classes:
+  * PromptInjectionModel       — DeBERTa, PyTorch, softmax
+  * MiniLMToxicSpamONNXModel   — MiniLM toxic/spam, ONNX, softmax
+
+Both expose `classify(text)` and `classify_batch(texts, batch_size=...)` returning
+results in the v1 shape: `{"scores": {<label>: <float>}, "raw": ..., "latency_ms": ...}`.
+Signal-workers' safety lens reads `res["scores"]["prompt_injection"]` and
+`res["scores"]["harmful_content"]`, so this shape is load-bearing.
+
+Threading:
+  PyTorch's DeBERTa has known meta-tensor thread-unsafety. PromptInjectionModel
+  serializes inference behind `_infer_lock`. ONNX sessions are thread-safe; the
+  MiniLM model does not lock.
+
+`torch._dynamo.config.disable = True` is the same workaround v1 used to
+prevent dynamo's meta-tensor state from leaking across threads.
+"""
 from __future__ import annotations
 
-import time
-from typing import Any
-
+import json
 import threading
+import time
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch._dynamo
 torch._dynamo.config.disable = True  # prevent meta-tensor threading conflicts
+
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from . import constants as C
 
 
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
 def resolve_device(requested: str) -> str:
+    """Return 'cuda' if asked AND available, else 'cpu'."""
     return "cuda" if requested == "cuda" and torch.cuda.is_available() else "cpu"
 
 
-class HFClassifier:
+def resolve_onnx_providers(requested: str = "auto") -> list[str]:
+    """Pick ORT execution providers based on request + what's installed.
+
+    'auto' / 'cuda' / 'gpu' prefer CUDA when present, fall back to CPU.
+    'cpu' forces CPU only.
+    """
+    import onnxruntime as ort
+    available = set(ort.get_available_providers())
+    requested = (requested or "auto").lower()
+    if requested == "cpu":
+        preferred = ["CPUExecutionProvider"]
+    elif requested in ("cuda", "gpu"):
+        preferred = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:  # auto
+        preferred = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return [p for p in preferred if p in available] or ["CPUExecutionProvider"]
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    logits = logits - np.max(logits, axis=-1, keepdims=True)
+    exp = np.exp(logits)
+    return exp / np.sum(exp, axis=-1, keepdims=True)
+
+
+# --------------------------------------------------------------------------
+# Prompt-injection model (PyTorch HF, DeBERTa)
+# --------------------------------------------------------------------------
+class PromptInjectionModel:
+    """DeBERTa prompt-injection classifier.
+
+    Score = max prob over labels whose lowercase contains any of
+    {'inject', 'attack', 'unsafe'} OR equals 'LABEL_1'. This is v2's
+    scoring rule, applied verbatim.
+    """
+
     def __init__(
         self,
         model_path: str,
         *,
         device: str = "cuda",
-        max_length: int = 128,
+        max_length: int = 512,
         fp16_on_cuda: bool = True,
     ) -> None:
         self.model_path = model_path
         self.device = resolve_device(device)
         self.max_length = max_length
-        try:
-            # Newer transformers: explicit fix
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
-        except TypeError:
-            # Older transformers don't know the kwarg — fall back to the slow tokenizer,
-            # which uses a different regex engine and isn't affected by the Mistral bug.
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self.model.eval()
         if self.device == "cuda":
@@ -44,10 +97,23 @@ class HFClassifier:
             if fp16_on_cuda:
                 self.model = self.model.half()
         cfg = getattr(self.model, "config", None)
-        self.id2label = {int(k): v for k, v in getattr(cfg, "id2label", {}).items()} if cfg else {}
+        self.id2label = (
+            {int(k): v for k, v in getattr(cfg, "id2label", {}).items()} if cfg else {}
+        )
         self._infer_lock = threading.Lock()
 
-    def _raw_probs(self, text: str, sigmoid: bool = False) -> tuple[dict[str, float], float]:
+    # ---- scoring -----------------------------------------------------
+    @staticmethod
+    def _score_from_raw(raw: dict[str, float]) -> float:
+        score = 0.0
+        for label, prob in raw.items():
+            low = label.lower()
+            if "inject" in low or "attack" in low or "unsafe" in low or label == "LABEL_1":
+                score = max(score, prob)
+        return score
+
+    # ---- single ------------------------------------------------------
+    def classify(self, text: str) -> dict[str, Any]:
         enc = self.tokenizer(
             text,
             return_tensors="pt",
@@ -63,29 +129,33 @@ class HFClassifier:
             logits = self.model(**enc).logits.float().detach().cpu()[0]
         if self.device == "cuda":
             torch.cuda.synchronize()
-        probs = torch.sigmoid(logits) if sigmoid else torch.softmax(logits, dim=-1)
-        return {
+        probs = torch.softmax(logits, dim=-1)
+        raw = {
             self.id2label.get(i, f"LABEL_{i}"): float(probs[i])
             for i in range(len(probs))
-        }, round((time.time() - started) * 1000, 3)
+        }
+        return {
+            "scores": {C.PROMPT_INJECTION: self._score_from_raw(raw)},
+            "raw": raw,
+            "latency_ms": round((time.time() - started) * 1000, 3),
+        }
 
-    def _raw_probs_batch(
+    # ---- batched (signal-workers entry point) ------------------------
+    def classify_batch(
         self,
         texts: list[str],
         *,
-        sigmoid: bool = False,
         batch_size: int = 32,
-    ) -> tuple[list[dict[str, float]], float]:
+    ) -> list[dict[str, Any]]:
         """Batched forward pass. One tokenize + one model call per chunk of
-        `batch_size`. Returns per-text raw probability dicts in input order
-        plus the total wall-clock latency in ms.
+        `batch_size`. Returns results in input order.
         """
         if not texts:
-            return [], 0.0
-        all_probs: list[dict[str, float]] = []
+            return []
+        all_raw: list[dict[str, float]] = []
         started = time.time()
-        for batch_start in range(0, len(texts), batch_size):
-            chunk = texts[batch_start:batch_start + batch_size]
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start:start + batch_size]
             enc = self.tokenizer(
                 chunk,
                 return_tensors="pt",
@@ -100,62 +170,70 @@ class HFClassifier:
                 logits = self.model(**enc).logits.float().detach().cpu()
             if self.device == "cuda":
                 torch.cuda.synchronize()
-            probs_batch = torch.sigmoid(logits) if sigmoid else torch.softmax(logits, dim=-1)
+            probs_batch = torch.softmax(logits, dim=-1)
             for probs in probs_batch:
-                all_probs.append({
+                all_raw.append({
                     self.id2label.get(i, f"LABEL_{i}"): float(probs[i])
                     for i in range(len(probs))
                 })
-        return all_probs, round((time.time() - started) * 1000, 3)
+        per_text_latency = round((time.time() - started) * 1000 / max(len(texts), 1), 3)
+        return [
+            {
+                "scores": {C.PROMPT_INJECTION: self._score_from_raw(raw)},
+                "raw": raw,
+                "latency_ms": per_text_latency,
+            }
+            for raw in all_raw
+        ]
 
-class PromptInjectionModel(HFClassifier):
-    def classify(self, text: str) -> dict[str, Any]:
-        raw, latency = self._raw_probs(text)
-        score = 0.0
-        for label, prob in raw.items():
-            low = label.lower()
-            if any(tok in low for tok in ("injection", "malicious", "attack", "unsafe")):
-                score = max(score, prob)
-            elif label == "LABEL_1":
-                score = max(score, prob)
-        return {"scores": {C.PROMPT_INJECTION: score}, "raw": raw, "latency_ms": latency}
 
-    def classify_batch(self, texts: list[str], *, batch_size: int = 32) -> list[dict[str, Any]]:
-        raws, total_latency = self._raw_probs_batch(texts, batch_size=batch_size)
-        per_text = round(total_latency / max(len(texts), 1), 3)
-        out = []
-        for raw in raws:
-            score = 0.0
-            for label, prob in raw.items():
-                low = label.lower()
-                if any(tok in low for tok in ("injection", "malicious", "attack", "unsafe")):
-                    score = max(score, prob)
-                elif label == "LABEL_1":
-                    score = max(score, prob)
-            out.append({"scores": {C.PROMPT_INJECTION: score}, "raw": raw, "latency_ms": per_text})
-        return out
+# --------------------------------------------------------------------------
+# Moderation model (MiniLM toxic/spam, ONNX)
+# --------------------------------------------------------------------------
+class MiniLMToxicSpamONNXModel:
+    """MiniLM toxic-spam classifier (ONNX) mapped to HARMFUL_CONTENT.
 
-class ONNXPromptInjectionModel:
-    def __init__(self, model_path: str, *, max_length: int = 128, **_: Any) -> None:
+    Score = max prob over labels whose lowercase is in `harmful_labels`.
+    Default `harmful_labels = ("toxic", "spam")` matches v2.
+
+    Expects the HF snapshot layout:
+      <model_path>/config.json
+      <model_path>/onnx/model.onnx
+      <model_path>/tokenizer.json   (and friends)
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        max_length: int = 512,
+        onnx_provider: str = "auto",
+        harmful_labels: tuple[str, ...] = ("toxic", "spam"),
+        **_: Any,
+    ) -> None:
         import onnxruntime as ort
-        self.max_length = max_length
-        try:
-            # Newer transformers: explicit fix
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
-        except TypeError:
-            # Older transformers don't know the kwarg — fall back to the slow tokenizer,
-            # which uses a different regex engine and isn't affected by the Mistral bug.
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-        self.session = ort.InferenceSession(
-            f"{model_path}/model.onnx",
-            providers=["CPUExecutionProvider"],
-        )
-        import json
-        from pathlib import Path
-        cfg_path = Path(model_path) / "config.json"
-        cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
-        self.id2label = {int(k): v for k, v in cfg.get("id2label", {}).items()}
 
+        self.model_path = model_path
+        self.max_length = max_length
+        self.harmful_labels = {label.lower() for label in harmful_labels}
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        cfg = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
+        self.id2label = {int(k): v for k, v in cfg.get("id2label", {}).items()}
+        self.providers = resolve_onnx_providers(onnx_provider)
+        self.session = ort.InferenceSession(
+            str(Path(model_path) / "onnx" / "model.onnx"),
+            providers=self.providers,
+        )
+        self.input_names = {inp.name for inp in self.session.get_inputs()}
+
+    # ---- scoring -----------------------------------------------------
+    def _score_from_raw(self, raw: dict[str, float]) -> float:
+        return max(
+            (prob for label, prob in raw.items() if label.lower() in self.harmful_labels),
+            default=0.0,
+        )
+
+    # ---- single ------------------------------------------------------
     def classify(self, text: str) -> dict[str, Any]:
         enc = self.tokenizer(
             text,
@@ -164,100 +242,58 @@ class ONNXPromptInjectionModel:
             padding=True,
             max_length=self.max_length,
         )
-        valid_inputs = {i.name for i in self.session.get_inputs()}
-        inputs = {k: v.astype(np.int64) for k, v in enc.items() if k in valid_inputs}
+        feed = {k: v.astype("int64") for k, v in enc.items() if k in self.input_names}
         started = time.time()
-        logits = self.session.run(None, inputs)[0][0]
-        latency = round((time.time() - started) * 1000, 3)
-        probs = np.exp(logits) / np.sum(np.exp(logits))
-        raw = {self.id2label.get(i, f"LABEL_{i}"): float(probs[i]) for i in range(len(probs))}
-        score = 0.0
-        for label, prob in raw.items():
-            low = label.lower()
-            if any(tok in low for tok in ("injection", "malicious", "attack", "unsafe")):
-                score = max(score, prob)
-            elif label == "LABEL_1":
-                score = max(score, prob)
-        return {"scores": {C.PROMPT_INJECTION: score}, "raw": raw, "latency_ms": latency}
-
-    def classify_batch(self, texts: list[str], *, batch_size: int = 32) -> list[dict[str, Any]]:
-        """Per-text loop. ONNX runtime can batch but the speedup is small on CPU
-        and we'd have to be careful about variable-length padding semantics.
-        Left as a per-text dispatch for now; revisit if ONNX path becomes hot.
-        The batch_size arg is accepted for API symmetry but unused.
-        """
-        return [self.classify(t) for t in texts]
-    
-class JailbreakModel(HFClassifier):
-    def classify(self, text: str) -> dict[str, Any]:
-        raw, latency = self._raw_probs(text)
-        score = 0.0
-        for label, prob in raw.items():
-            low = label.lower()
-            if any(tok in low for tok in ("jailbreak", "attack", "unsafe", "malicious")):
-                score = max(score, prob)
-            elif label == "LABEL_1":
-                score = max(score, prob)
-        return {"scores": {C.JAILBREAK: score}, "raw": raw, "latency_ms": latency}
-
-
-class ModerationModel(HFClassifier):
-    def classify(self, text: str) -> dict[str, Any]:
-        raw, latency = self._raw_probs(text, sigmoid=True)
-        harmful = 0.0
-        sexual = 0.0
-        for label, prob in raw.items():
-            low = label.lower()
-            if "sexual" in low or low in ("s", "s3"):
-                sexual = max(sexual, prob)
-            if (
-                "harmful" in low
-                or "hate" in low
-                or "harassment" in low
-                or "toxic" in low
-                or "violence" in low
-                or "self" in low
-                or low in ("h", "h2", "hr", "sh", "v", "v2")
-            ):
-                harmful = max(harmful, prob)
-            if label == "LABEL_0":
-                harmful = max(harmful, prob)
-            if label == "LABEL_1":
-                sexual = max(sexual, prob)
+        logits = self.session.run(None, feed)[0]
+        probs = _softmax(logits)[0]
+        raw = {
+            self.id2label.get(i, f"LABEL_{i}"): float(probs[i])
+            for i in range(len(probs))
+        }
         return {
-            "scores": {C.HARMFUL_CONTENT: harmful, C.SEXUAL: sexual},
-            "raw": raw,
-            "latency_ms": latency,
+            "scores": {C.HARMFUL_CONTENT: self._score_from_raw(raw)},
+            "raw": {"scores": raw, "providers": self.session.get_providers()},
+            "latency_ms": round((time.time() - started) * 1000, 3),
         }
 
-    def classify_batch(self, texts: list[str], *, batch_size: int = 32) -> list[dict[str, Any]]:
-        raws, total_latency = self._raw_probs_batch(texts, sigmoid=True, batch_size=batch_size)
-        per_text = round(total_latency / max(len(texts), 1), 3)
-        out = []
-        for raw in raws:
-            harmful = 0.0
-            sexual = 0.0
-            for label, prob in raw.items():
-                low = label.lower()
-                if "sexual" in low or low in ("s", "s3"):
-                    sexual = max(sexual, prob)
-                if (
-                    "harmful" in low
-                    or "hate" in low
-                    or "harassment" in low
-                    or "toxic" in low
-                    or "violence" in low
-                    or "self" in low
-                    or low in ("h", "h2", "hr", "sh", "v", "v2")
-                ):
-                    harmful = max(harmful, prob)
-                if label == "LABEL_0":
-                    harmful = max(harmful, prob)
-                if label == "LABEL_1":
-                    sexual = max(sexual, prob)
-            out.append({
-                "scores": {C.HARMFUL_CONTENT: harmful, C.SEXUAL: sexual},
-                "raw": raw,
-                "latency_ms": per_text,
-            })
+    # ---- batched (signal-workers entry point) ------------------------
+    def classify_batch(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 32,
+    ) -> list[dict[str, Any]]:
+        """Batched ONNX inference. ORT happily accepts a (B, T) input batch with
+        padding; one tokenize + one session.run per chunk.
+        """
+        if not texts:
+            return []
+        out: list[dict[str, Any]] = []
+        providers = self.session.get_providers()
+        started = time.time()
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start:start + batch_size]
+            enc = self.tokenizer(
+                chunk,
+                return_tensors="np",
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+            )
+            feed = {k: v.astype("int64") for k, v in enc.items() if k in self.input_names}
+            logits = self.session.run(None, feed)[0]
+            probs_batch = _softmax(logits)
+            for probs in probs_batch:
+                raw = {
+                    self.id2label.get(i, f"LABEL_{i}"): float(probs[i])
+                    for i in range(len(probs))
+                }
+                out.append({
+                    "scores": {C.HARMFUL_CONTENT: self._score_from_raw(raw)},
+                    "raw": {"scores": raw, "providers": providers},
+                    "latency_ms": 0.0,  # filled below
+                })
+        per_text_latency = round((time.time() - started) * 1000 / max(len(texts), 1), 3)
+        for r in out:
+            r["latency_ms"] = per_text_latency
         return out
