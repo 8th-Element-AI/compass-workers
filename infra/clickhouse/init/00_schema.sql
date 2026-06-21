@@ -121,7 +121,7 @@ CREATE TABLE signal_derived_metrics
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (solution_id, scope, metric, ts, component_id)
-TTL toDateTime(ts) + INTERVAL 90 DAY;
+TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS
     -- Idempotent worker writes: ClickHouse remembers the last N insert tokens
     -- and drops re-inserts that carry a matching insert_deduplication_token,

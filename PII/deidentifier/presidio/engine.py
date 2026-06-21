@@ -1,5 +1,5 @@
 """
-Presidio-backed de-identification engine — the single engine for all use cases.
+Presidio-backed PII detection engine — the single engine for all use cases.
 
 Supports two modes selected at construction time:
 
@@ -21,33 +21,29 @@ Singleton helper (thread-safe):
     engine = PresidioEngine.get_instance(ner_model="en_core_web_sm")
 
 Public API:
-    engine.process(text, document_id=None)        -> DeidentificationResult
-    engine.batch_process(texts, document_ids=...)  -> list[DeidentificationResult]   (sequential)
-    engine.analyze(text)                           -> AnalysisResult   (detect only, no anonymize)
+    engine.analyze(text)                           -> AnalysisResult   (aggregate counts)
     engine.batch_analyze(texts)                    -> list[AnalysisResult]   (sequential)
     engine.analyze_batch(texts, batch_size=4)      -> list[AnalysisResult]   (CONCURRENT — preferred)
+    engine.detect(text)                            -> list[RecognizerResult]  (span-level — entity_type/start/end/score per match; for tooling that needs positions, e.g. evaluation scripts)
+    engine.evaluate(text)                          -> EvaluationResult  (severity-scored entity combinations; detection-only, does not anonymize)
 """
 from __future__ import annotations
 
 import logging
 import os
 import threading
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
-from ..audit import AuditEntry, AuditLogger, AuditRecord
 from ..config import PolicyConfig
-from ..result import AnalysisResult, DeidentificationResult
-from ..entities import Strategy
+from ..policy_evaluator import PolicyEvaluator, Severity, _SEVERITY_RANK
+from ..result import AnalysisResult, EvaluationResult
 
 logger = logging.getLogger(__name__)
 
 try:
     from presidio_analyzer import AnalyzerEngine
     from presidio_analyzer.nlp_engine import NlpEngineProvider
-    from presidio_anonymizer import AnonymizerEngine
-    from presidio_anonymizer.entities import OperatorConfig
     _PRESIDIO_AVAILABLE = True
 except ImportError:
     _PRESIDIO_AVAILABLE = False
@@ -60,7 +56,7 @@ _ALL_ENTITIES: List[str] = [
     "LOCATION", "MEDICAL_LICENSE", "PERSON", "PHONE_NUMBER", "URL", "NRP",
     "US_BANK_NUMBER", "US_DRIVER_LICENSE", "US_PASSPORT", "US_SSN",
     "DATE_OF_BIRTH", "MEDICAL_RECORD_NUMBER", "AGE", "ZIP_CODE",
-    "MEDICARE_ID", "ORG",
+    "MEDICARE_ID", "ORG", "GENDER",
 ]
 
 _HF_LABEL_MAP: Dict[str, str] = {
@@ -78,7 +74,10 @@ _HF_LABEL_MAP: Dict[str, str] = {
     "SSN": "US_SSN", "US_SSN": "US_SSN", "ZIP": "ZIP_CODE", "AGE": "AGE",
     "US_PASSPORT": "US_PASSPORT", "US_DRIVER_LICENSE": "US_DRIVER_LICENSE",
     "US_BANK_NUMBER": "US_BANK_NUMBER", "CREDIT_CARD": "CREDIT_CARD",
-    "IBAN_CODE": "IBAN_CODE", "IP_ADDRESS": "IP_ADDRESS",
+    "IBAN_CODE": "IBAN_CODE",
+    # IP_ADDRESS intentionally omitted — the NER model misclassifies decimal
+    # numbers (e.g. currency amounts) as IPs. Presidio's built-in IpRecognizer
+    # (strict 4-octet regex) handles real IP addresses reliably.
     "ORG": "ORG", "ORGANIZATION": "ORG", "PATORG": "ORG", "FINANCIAL": "ORG",
     "OTHERPHI": "NRP", "USERNAME": "NRP", "NRP": "NRP",
     "PROFESSION": "NRP", "MISC": "NRP",
@@ -107,15 +106,8 @@ def _build_long_doc_nlp_engine(models, ner_config):
     return _Impl(models=models, ner_model_configuration=ner_config)
 
 
-def _make_operator(strategy: Strategy, entity: str) -> "OperatorConfig":
-    if strategy == Strategy.REDACT:
-        return OperatorConfig("replace", {"new_value": f"[{entity}]"})
-    if strategy == Strategy.MASK:
-        return OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 500, "from_end": False})
-    return OperatorConfig("replace", {"new_value": f"<{entity}>"})
-
 class PresidioEngine:
-    """Single configurable de-identification engine.
+    """Single configurable PII detection engine.
 
     Thread-safe singleton: `get_instance()` uses a lock around construction so
     concurrent callers (e.g. a multi-threaded worker manager) never build the
@@ -134,7 +126,6 @@ class PresidioEngine:
         cls,
         ner_model: Optional[str] = None,
         policy: Optional[PolicyConfig] = None,
-        audit_logger: Optional[AuditLogger] = None,
     ) -> "PresidioEngine":
         # Double-checked locking — fast path avoids the lock once initialised.
         if cls._instance is None:
@@ -142,7 +133,7 @@ class PresidioEngine:
                 if cls._instance is None:
                     chosen = ner_model
                     cls._instance = cls(
-                        ner_model=chosen, policy=policy, audit_logger=audit_logger,
+                        ner_model=chosen, policy=policy,
                     )
                     logger.info(
                         "PresidioEngine singleton created (ner_model=%s).",
@@ -171,7 +162,6 @@ class PresidioEngine:
         self,
         ner_model: Optional[str] = None,
         policy: Optional[PolicyConfig] = None,
-        audit_logger: Optional[AuditLogger] = None,
         hf_label_map: Optional[Dict[str, str]] = None,
     ) -> None:
         if not _PRESIDIO_AVAILABLE:
@@ -191,7 +181,6 @@ class PresidioEngine:
             policy = PolicyConfig.default()
             policy.score_threshold = 0.35
         self.policy = policy
-        self.audit_logger = audit_logger or AuditLogger()
 
         if _use_hf:
             from presidio_analyzer.nlp_engine import NerModelConfiguration
@@ -236,8 +225,7 @@ class PresidioEngine:
         from .recognizers import register_all
         register_all(self._analyzer.registry)
 
-        self._anonymizer = AnonymizerEngine()
-        self._operators: Dict[str, "OperatorConfig"] = self._build_operators()
+        self._evaluator = PolicyEvaluator()
 
         backend = f"transformers:{ner_model}" if _use_hf else f"spacy:{_spacy_name}"
         logger.info(
@@ -250,72 +238,90 @@ class PresidioEngine:
     # Public API
     # ==================================================================
 
-    def process(self, text: str, document_id: Optional[str] = None,
-                language: str = "en") -> DeidentificationResult:
-        import time
-        document_id = document_id or str(uuid.uuid4())
-        enabled = [e for e in _ALL_ENTITIES if self.policy.is_entity_enabled(e)]
-
-        t0 = time.perf_counter()
-        analyzer_results = self._analyzer.analyze(text=text, language=language, entities=enabled)
-        analyzer_results = [r for r in analyzer_results if r.score >= self.policy.score_threshold]
-        t_id_ms = (time.perf_counter() - t0) * 1000
-
-        t1 = time.perf_counter()
-        anonymized = self._anonymizer.anonymize(
-            text=text, analyzer_results=analyzer_results, operators=self._operators,
-        )
-        t_deid_ms = (time.perf_counter() - t1) * 1000
-
-        audit_record = AuditRecord(
-            document_id=document_id,
-            entities_found=len(analyzer_results),
-            entities_processed=len(analyzer_results),
-        )
-        for r in analyzer_results:
-            audit_record.add_entry(AuditEntry(
-                entity_type=r.entity_type,
-                strategy=self.policy.get_entity_strategy(r.entity_type).value,
-                start=r.start, end=r.end,
-                original_length=r.end - r.start, score=r.score,
-            ))
-        self.audit_logger.log(audit_record)
-
-        logger.debug("Timings — id:%.1fms deid:%.1fms", t_id_ms, t_deid_ms)
-
-        return DeidentificationResult(
-            document_id=document_id, original_text=text,
-            deidentified_text=anonymized.text, audit_record=audit_record,
-        )
-
-    def batch_process(self, texts: List[str], document_ids: Optional[List[str]] = None,
-                      language: str = "en") -> List[DeidentificationResult]:
-        """Sequential — kept for backwards-compatibility. Use `analyze_batch`
-        for the parallel detection-only path."""
-        if document_ids is None:
-            document_ids = [None] * len(texts)
-        return [self.process(t, did, language) for t, did in zip(texts, document_ids)]
-
-    def analyze(self, text: str, language: str = "en") -> AnalysisResult:
-        """Detection only — no text replacement. Faster than process() for
-        observability use cases."""
+    def _detect(self, text: str, language: str = "en") -> List["RecognizerResult"]:
         enabled = [e for e in _ALL_ENTITIES if self.policy.is_entity_enabled(e)]
         results = self._analyzer.analyze(text=text, language=language, entities=enabled)
-        results = [r for r in results if r.score >= self.policy.score_threshold]
+        return [r for r in results if r.score >= self.policy.score_threshold]
 
-        entities: Dict[str, int] = {}
+    def detect(self, text: str, language: str = "en") -> List["RecognizerResult"]:
+        """Span-level detection — entity_type/start/end/score per match. For
+        callers needing positions (e.g. evaluation tooling); most callers
+        should use analyze() for aggregate counts instead."""
+        return self._detect(text, language)
+
+    def analyze(self, text: str, language: str = "en") -> AnalysisResult:
+        """Detection + severity evaluation.
+
+        Entities counted in `entity_count`/`entities`/`has_pii` are filtered
+        to those contributing to a violation of severity >= MEDIUM. Raw
+        detection counts are preserved in `raw_entity_count`/`raw_entities`
+        for debugging.
+
+        The return shape is backwards-compatible with callers that only
+        read has_pii/entity_count/entities — only the *semantics* changed
+        (from "any detection" to "re-identification risk").
+        """
+        results = self._detect(text, language)
+
+        # ---- Raw detection layer (always populated, for debugging) ----
+        raw_entities: Dict[str, int] = {}
         for r in results:
-            entities[r.entity_type] = entities.get(r.entity_type, 0) + 1
+            raw_entities[r.entity_type] = raw_entities.get(r.entity_type, 0) + 1
+        raw_count = len(results)
+
+        # ---- Severity evaluation ----
+        violations = self._evaluator.evaluate(text, results)
+        max_severity = max(
+            (v.severity for v in violations),
+            key=lambda s: _SEVERITY_RANK[s],
+            default=Severity.NONE,
+        )
+
+        # ---- Filter: entities contributing to a violation of severity >= MEDIUM ----
+        risky_entity_ids: set = set()
+        for v in violations:
+            if _SEVERITY_RANK[v.severity] >= _SEVERITY_RANK[Severity.MEDIUM]:
+                risky_entity_ids.update(id(e) for e in v.entities)
+
+        risky_entities: Dict[str, int] = {}
+        for r in results:
+            if id(r) in risky_entity_ids:
+                risky_entities[r.entity_type] = risky_entities.get(r.entity_type, 0) + 1
+        risky_count = sum(risky_entities.values())
 
         return AnalysisResult(
-            has_pii=len(results) > 0,
-            entity_count=len(results),
-            entities=entities,
+            # risk-aware (worker reads these)
+            has_pii=risky_count > 0,
+            entity_count=risky_count,
+            entities=risky_entities,
+            # severity layer
+            severity=max_severity,
+            has_violation=bool(violations),
+            violations=violations,
+            # raw detection layer
+            raw_entity_count=raw_count,
+            raw_entities=raw_entities,
         )
 
     def batch_analyze(self, texts: List[str], language: str = "en") -> List[AnalysisResult]:
         """Sequential `analyze` — kept for callers that don't want concurrency."""
         return [self.analyze(t, language) for t in texts]
+
+    def evaluate(self, text: str, language: str = "en") -> EvaluationResult:
+        """Detect, then score entity combinations for re-identification risk.
+        Detection-only — does not anonymize. See policy_evaluator.PolicyEvaluator."""
+        results = self._detect(text, language)
+        violations = self._evaluator.evaluate(text, results)
+        max_severity = max(
+            (v.severity for v in violations),
+            key=lambda s: _SEVERITY_RANK[s],
+            default=Severity.NONE,
+        )
+        return EvaluationResult(
+            violations=violations,
+            max_severity=max_severity,
+            has_violation=bool(violations),
+        )
 
     # ------------------------------------------------------------------
     # Concurrent batched analysis (the fast path for observability)
@@ -396,9 +402,3 @@ class PresidioEngine:
                 )
         except ImportError:
             pass
-
-    def _build_operators(self) -> Dict[str, "OperatorConfig"]:
-        return {
-            entity: _make_operator(self.policy.get_entity_strategy(entity), entity)
-            for entity in _ALL_ENTITIES
-        }

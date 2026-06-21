@@ -41,7 +41,7 @@ LENS = "safety"
 # These sets drive the toggle-gate sub-filtering (_spans_needing(kept, step.metrics)).
 # They MUST match metric names in SPECS exactly. Adding a metric requires updating
 # both the relevant set here and the SPECS list below.
-PII_METRICS              = {"pii_count", "pii_detected"}
+PII_METRICS              = {"pii_detected"}
 PROMPT_INJECTION_METRICS = {"prompt_injection_detected"}
 MODERATION_METRICS       = {"toxicity_detected"}
 TOXICITY_ALL_METRICS     = PROMPT_INJECTION_METRICS | MODERATION_METRICS
@@ -57,52 +57,103 @@ def _spec(metric, applies, pattern, inputs, unit, window="1h",
 # ---- meta_fn: attach per-row detail to metric_meta -----------------------------
 
 def _pii_meta(span, ctx):
-    if not ctx.get("pii_types"):
+    """Per-row PII detail attached to metric_meta.
+
+    Always emitted when anything was detected (risk-flagged or not). Carries:
+      - count       : risk-filtered entity count (was the old pii_count value)
+      - severity    : max severity across input/output (none|low|medium|high|phi)
+      - types       : risk-filtered entity types (only when pii_detected=1)
+      - location    : input | output | both (only when pii_detected=1)
+      - violations  : list of {rule, severity, location, entity_types}
+                      (only when pii_detected=1)
+      - raw_count   : pre-filter detection count (only when it differs from count)
+      - raw_types   : pre-filter detection types (only when raw_count differs)
+
+    Returns None when there's nothing to report at all (no detection, no raw).
+    """
+    detected  = ctx.get("pii_detected", 0.0) > 0.0
+    count     = int(ctx.get("pii_count", 0))
+    raw_count = int(ctx.get("pii_raw_count", 0))
+
+    if not detected and raw_count == 0:
         return None
-    meta = {"types": ctx["pii_types"]}
-    if ctx.get("pii_location"):
-        meta["location"] = ctx["pii_location"]
+
+    meta = {
+        "count":    count,
+        "severity": ctx.get("pii_severity", "none"),
+    }
+
+    if detected:
+        meta["types"] = ctx.get("pii_types", [])
+        if ctx.get("pii_location"):
+            meta["location"] = ctx["pii_location"]
+        if ctx.get("pii_violations"):
+            meta["violations"] = ctx["pii_violations"]
+
+    # Diagnostic: surface raw layer when filter dropped detections
+    if raw_count != count:
+        meta["raw_count"] = raw_count
+        meta["raw_types"] = ctx.get("pii_raw_types", [])
+
     return meta
 
 def _prompt_injection_meta(span, ctx):
-    score = float(ctx.get("prompt_injection_score", 0.0))
-    if score == 0.0 and not ctx.get("prompt_injection_ran"):
-        return None
+    """Always emit — proves the pipeline ran on this span.
+
+    Fields:
+      prompt_injection_score : final score (0.0 if not detected / not routed)
+      pi_bert_ran            : true if PI BERT actually executed
+      pipeline_stage         : 'evaluated' if router produced FT scores,
+                               'skipped'   if no router output (toggle off,
+                                           empty input, or model load failed)
+      routing                : FastText scores + rule reasons (only when router ran)
+      triggered_models       : models that actually ran for this span
+    """
+    score   = float(ctx.get("prompt_injection_score", 0.0))
+    pi_ran  = bool(ctx.get("prompt_injection_ran", False))
+    router_ft = ctx.get("router_ft_scores")
+
     meta = {
         "prompt_injection_score": round(score, 4),
-        "triggered_models": ctx.get("triggered_models", []),
+        "pi_bert_ran":            pi_ran,
+        "triggered_models":       ctx.get("triggered_models", []),
+        "pipeline_stage":         "evaluated" if router_ft is not None else "skipped",
     }
-    if ctx.get("router_ft_scores"):
+    if router_ft is not None:
         meta["routing"] = {
-            "fasttext": ctx["router_ft_scores"],
-            "rule_reasons": ctx.get("router_rule_reasons", []),
+            "fasttext":     {k: round(v, 4) for k, v in router_ft.items()},
+            "rule_reasons": ctx.get("router_rule_reasons") or [],
         }
     return meta
 
 def _toxicity_meta(span, ctx):
+    """Always emit — proves the pipeline ran on this span. Same shape pattern
+    as _prompt_injection_meta."""
     harmful = float(ctx.get("harmful_content_score", 0.0))
     sexual  = float(ctx.get("sexual_content_score", 0.0))
-    if harmful == 0.0 and sexual == 0.0 and not ctx.get("moderation_ran"):
-        return None
+    mod_ran = bool(ctx.get("moderation_ran", False))
+    router_ft = ctx.get("router_ft_scores")
+
     meta = {
         "harmful_content_score": round(harmful, 4),
         "sexual_content_score":  round(sexual, 4),
-        "triggered_models": ctx.get("triggered_models", []),
+        "moderation_bert_ran":   mod_ran,
+        "triggered_models":      ctx.get("triggered_models", []),
+        "pipeline_stage":        "evaluated" if router_ft is not None else "skipped",
     }
     if ctx.get("moderation_location"):
         meta["moderation_location"] = ctx["moderation_location"]
-    if ctx.get("router_ft_scores"):
+    if router_ft is not None:
         meta["routing"] = {
-            "fasttext": ctx["router_ft_scores"],
-            "rule_reasons": ctx.get("router_rule_reasons", []),
+            "fasttext":     {k: round(v, 4) for k, v in router_ft.items()},
+            "rule_reasons": ctx.get("router_rule_reasons") or [],
         }
     return meta
 
 
 SPECS = [
     # PII
-    _spec("pii_count",    llm_call, ctx_value("pii_count"), ["metadata.input + metadata.output -> presidio.entity_count"], unit="count", window="1h", threshold=True, meta_fn=_pii_meta),
-    _spec("pii_detected", llm_call, ctx_value("pii_detected"), ["pii_count > 0"], unit="ratio", window="1h", threshold=True),
+    _spec("pii_detected", llm_call, ctx_value("pii_detected"), ["pii_count > 0"], unit="ratio", window="1h", threshold=True, meta_fn=_pii_meta),
 
     # Prompt injection (input only)
     _spec("prompt_injection_detected", llm_call, ctx_value("prompt_injection_detected"), ["metadata.input -> fasttext + prompt_injection BERT"], unit="ratio", window="1h", threshold=True, meta_fn=_prompt_injection_meta),
@@ -196,6 +247,8 @@ class SafetyWorker(SpecWorker):
                 analyze=self._analyze_moderation,
             ),
         ]
+
+        self._verify_models_ready()
         
     # ------------------------------------------------------------------
     # Lazy holders
@@ -445,6 +498,81 @@ class SafetyWorker(SpecWorker):
             total_ms, step_str, emit_ms, len(rows),
         )
         return rows
+    
+    def _verify_models_ready(self) -> None:
+        """Validate every model artifact at startup, before accepting batches.
+
+        Catches the entire class of silent failures where a model fails to
+        load (wrong path, missing file, corrupted weights, missing HF cache)
+        and the worker happily emits zero-score metrics that look like
+        "evaluated, clean" but are actually "evaluated, broken."
+
+        Called from __init__. Crashes loud on any problem.
+        """
+        from pathlib import Path
+        c = self.cfg
+
+        log.info("[safety] startup health check: verifying model artifacts...")
+
+        # -- Toxicity models -----------------------------------------------
+        root = Path(c.signal_toxicity_models_root)
+
+        def _resolve(rel: str) -> Path:
+            p = Path(rel)
+            return p if p.is_absolute() else root / p
+
+        tox_artifacts = [
+            ("fasttext_router",        _resolve(c.signal_toxicity_fasttext_path),  "file",     True),
+            ("prompt_injection",       _resolve(c.signal_toxicity_pi_path),        "dir",      True),
+            ("prompt_injection_onnx",  _resolve(c.signal_toxicity_pi_onnx_path),   "dir",      False),  # CPU optimization, optional
+            ("moderation",             _resolve(c.signal_toxicity_mod_path),       "dir",      True),
+        ]
+
+        missing = []
+        for name, path, kind, required in tox_artifacts:
+            if not path.exists():
+                if required:
+                    missing.append((name, path))
+                    log.error("[safety] FAIL: %s missing at %s", name, path)
+                else:
+                    log.info("[safety]  OK: %s NOT found at %s (optional, will fall back)", name, path)
+                continue
+            if kind == "file":
+                size_mb = path.stat().st_size / (1024 * 1024)
+                log.info("[safety]  OK: %-25s %s  (%.1f MB)", name, path, size_mb)
+            else:
+                n_files = sum(1 for _ in path.rglob("*") if _.is_file())
+                log.info("[safety]  OK: %-25s %s  (%d files)", name, path, n_files)
+
+        # -- PII NER model in HF cache -------------------------------------
+        if c.signal_pii_ner_model and "/" in c.signal_pii_ner_model:
+            try:
+                from huggingface_hub import try_to_load_from_cache
+                cached = try_to_load_from_cache(c.signal_pii_ner_model, "config.json")
+                if cached is None:
+                    missing.append(("pii_ner_model (HF cache)", Path(c.signal_pii_ner_model)))
+                    log.error("[safety] FAIL: PII NER model '%s' not in HF cache",
+                            c.signal_pii_ner_model)
+                else:
+                    log.info("[safety]  OK: %-25s %s",
+                            "pii_ner_model", c.signal_pii_ner_model)
+            except ImportError:
+                log.warning("[safety] huggingface_hub not installed — skipping PII NER cache check")
+
+        # -- Bail loud if anything was missing -----------------------------
+        if missing:
+            lines = [
+                f"Safety worker startup failed: {len(missing)} required artifact(s) not found:",
+                *(f"  - {name}: {path}" for name, path in missing),
+                "",
+                "Common fixes:",
+                f"  - Toxicity models: `toxicity-observe download` or set SIGNAL_TOXICITY_MODELS_ROOT correctly (current: {root})",
+                f"  - PII NER: python -c \"from transformers import pipeline; "
+                f"pipeline('ner', model='{c.signal_pii_ner_model}', aggregation_strategy='first')\"",
+            ]
+            raise FileNotFoundError("\n".join(lines))
+
+        log.info("[safety] startup health check: PASSED")
 
     # ------------------------------------------------------------------
     # build_context — read all four caches, summarize per span
@@ -458,6 +586,7 @@ class SafetyWorker(SpecWorker):
         in_pii  = self._pii_cache.get(self._hash(input_text))  if input_text  else None
         out_pii = self._pii_cache.get(self._hash(output_text)) if output_text else None
 
+        # Risk-filtered counts and types (what survived severity >= MEDIUM)
         in_count  = in_pii.entity_count  if in_pii  else 0
         out_count = out_pii.entity_count if out_pii else 0
         total_pii = in_count + out_count
@@ -467,6 +596,35 @@ class SafetyWorker(SpecWorker):
             if res:
                 for t, c in res.entities.items():
                     types[t] = types.get(t, 0) + c
+
+        # Raw (pre-filter) counts and types — useful for tuning and debugging
+        in_raw_count  = in_pii.raw_entity_count  if in_pii  else 0
+        out_raw_count = out_pii.raw_entity_count if out_pii else 0
+        total_raw_pii = in_raw_count + out_raw_count
+
+        raw_types = {}
+        for res in (in_pii, out_pii):
+            if res:
+                for t, c in res.raw_entities.items():
+                    raw_types[t] = raw_types.get(t, 0) + c
+
+        # Severity — max across input + output (matches build_context's "any detection" semantics)
+        from deidentifier.policy_evaluator import Severity, _SEVERITY_RANK
+        in_sev  = in_pii.severity  if in_pii  else Severity.NONE
+        out_sev = out_pii.severity if out_pii else Severity.NONE
+        max_sev = in_sev if _SEVERITY_RANK[in_sev] >= _SEVERITY_RANK[out_sev] else out_sev
+
+        # Violations — flattened for metric_meta (rule name + severity + entity types + which side)
+        violations_meta = []
+        for res, loc in ((in_pii, "input"), (out_pii, "output")):
+            if res:
+                for v in res.violations:
+                    violations_meta.append({
+                        "rule":         v.rule_name,
+                        "severity":     v.severity.value,
+                        "location":     loc,
+                        "entity_types": sorted({e.entity_type for e in v.entities}),
+                    })
 
         if in_count and out_count:
             pii_location = "both"
@@ -539,10 +697,14 @@ class SafetyWorker(SpecWorker):
 
         return {
             # PII
-            "pii_count":     float(total_pii),
-            "pii_detected":  1.0 if total_pii > 0 else 0.0,
-            "pii_types":     sorted(types.keys()),
-            "pii_location":  pii_location,
+            "pii_detected":   1.0 if total_pii > 0 else 0.0,
+            "pii_count":      float(total_pii),         # still in ctx so _pii_meta can read it
+            "pii_types":      sorted(types.keys()),
+            "pii_location":   pii_location,
+            "pii_severity":   max_sev.value,
+            "pii_raw_count":  int(total_raw_pii),
+            "pii_raw_types":  sorted(raw_types.keys()),
+            "pii_violations": violations_meta,
             # Prompt injection
             "prompt_injection_detected": pi_detected,
             "prompt_injection_score":    pi_score,

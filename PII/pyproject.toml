@@ -5,20 +5,57 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "deidentifier"
 version = "1.0.0"
-description = "PHI/PII de-identification for text processing"
+description = "Presidio-backed PII/PHI detection with quasi-identifier risk scoring"
 requires-python = ">=3.9"
+
+# Always required to import and use PresidioEngine in any mode
+# (regex-only, spaCy, or HF). spaCy is the tokenizer backend even in
+# regex-only mode, so it's not optional.
 dependencies = [
-    "spacy>=3.0.0",
-    "faker>=19.0.0",
-    "pyyaml>=6.0.0",
-    "cryptography>=41.0.0",
+    "spacy==3.8.14",
+    "PyYAML==6.0.3",
+    "presidio-analyzer==2.2.362",
+    "huggingface-hub>=0.20.0",
+    "click>=8.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0"]
-presidio = [
-    "presidio-analyzer>=2.2",
-    "presidio-anonymizer>=2.2",
+
+# HuggingFace NER mode (what Signal Safety uses).
+# Required when ner_model is a HF model ID like
+# "gravitee-io/bert-small-pii-detection".
+#
+# torch is declared loosely because production deployments typically
+# pre-install the CPU-only wheel from pytorch.org:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# That CPU wheel (2.x.y+cpu) satisfies the range below.
+hf = [
+    "torch>=2.0,<3.0",
+    "transformers==4.57.6",
+    "spacy-huggingface-pipelines==0.0.4",
+]
+
+# REST API server (deidentifier/api.py)
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic==2.13.4",
+]
+
+# Model evaluation tooling (eval/evaluate.py, eval/benchmark_models.py)
+eval = [
+    "kaggle>=1.6",
+]
+
+# Dev / testing
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+# Convenience: install everything for local dev
+all = [
+    "deidentifier[hf,api,eval,dev]",
 ]
 
 [project.scripts]

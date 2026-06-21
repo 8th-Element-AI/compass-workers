@@ -20,6 +20,11 @@ FROM python:3.11-slim AS models
 WORKDIR /build
 ENV HF_HOME=/opt/hf-cache
 
+# Build deps for fasttext-numpy2-wheel (in case pip doesn't find a matching wheel)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY toxicity/pyproject.toml /build/toxicity/pyproject.toml
 COPY toxicity/toxicity_observability /build/toxicity/toxicity_observability
 COPY toxicity/configs /build/toxicity/configs
@@ -63,8 +68,7 @@ WORKDIR /opt/signal
 COPY PII      /opt/signal/PII
 COPY toxicity /opt/signal/toxicity
 
-RUN pip install --no-cache-dir -r /opt/signal/PII/requirements.txt && \
-    pip install --no-cache-dir -e /opt/signal/PII && \
+RUN pip install --no-cache-dir -e "/opt/signal/PII[hf]" && \
     pip install --no-cache-dir -e /opt/signal/toxicity
 
 # spaCy tokenizer for Presidio

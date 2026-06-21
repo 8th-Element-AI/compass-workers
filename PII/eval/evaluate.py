@@ -1,5 +1,10 @@
 """
-Evaluate the Presidio de-identification engine against the Kaggle PII dataset.
+Evaluate the Presidio PII detection engine against the Kaggle PII dataset.
+
+Scores entity-level detection (precision/recall/F1 via IOU span matching).
+Also runs PresidioEngine.evaluate() per document and includes PolicyEvaluator
+violations in the output JSON — informational only, since this dataset has no
+violation/severity ground truth to score against.
 
 Dataset: https://www.kaggle.com/datasets/alejopaullier/pii-external-dataset
 
@@ -19,7 +24,7 @@ import ast
 import csv
 import logging
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 logging.basicConfig(level=logging.ERROR)
@@ -132,6 +137,7 @@ def evaluate(
     tp: dict[str, int] = defaultdict(int)
     fp: dict[str, int] = defaultdict(int)
     fn: dict[str, int] = defaultdict(int)
+    severity_counts: Counter[str] = Counter()
 
     with open(path, encoding="utf-8", newline="") as f:
         reader = list(csv.DictReader(f))
@@ -151,11 +157,19 @@ def evaluate(
         trailing_ws = ast.literal_eval(row["trailing_whitespace"])
 
         gold_spans = bio_to_spans(tokens, labels, trailing_ws)
-        result     = engine.process(text)
+        detections = engine.detect(text)
         pred_spans = [
             (e.start, e.end, e.entity_type)
-            for e in result.audit_record.entries
+            for e in detections
         ]
+
+        # PolicyEvaluator violations — informational only. The Kaggle dataset
+        # has no violation/severity ground truth, so this isn't scored against
+        # gold labels like entity detection is; it's surfaced in the output
+        # JSON for manual/qualitative review of the combination rules.
+        evaluation = engine.evaluate(text)
+        for v in evaluation.violations:
+            severity_counts[v.severity.value] += 1
 
         matched_gold: set[int] = set()
 
@@ -177,7 +191,6 @@ def evaluate(
         output_records.append({
             "document_id":       row["document"],
             "original_text":     text,
-            "deidentified_text": result.deidentified_text,
             "entities": [
                 {
                     "entity_type":   e.entity_type,
@@ -185,9 +198,20 @@ def evaluate(
                     "start":         e.start,
                     "end":           e.end,
                     "score":         round(e.score, 4),
-                    "strategy":      e.strategy,
                 }
-                for e in result.audit_record.entries
+                for e in detections
+            ],
+            "max_severity": evaluation.max_severity.value,
+            "violations": [
+                {
+                    "kind":         v.kind.value,
+                    "severity":     v.severity.value,
+                    "rule_name":    v.rule_name,
+                    "entity_types": [e.entity_type for e in v.entities],
+                    "span":         list(v.span),
+                    "score":        round(v.score, 4),
+                }
+                for v in evaluation.violations
             ],
         })
 
@@ -197,6 +221,20 @@ def evaluate(
     print(f"\nDetailed output written to: {out.resolve()}\n")
 
     _print_results(tp, fp, fn)
+    _print_severity_summary(severity_counts)
+
+
+def _print_severity_summary(severity_counts: Counter[str]) -> None:
+    """Informational only — PolicyEvaluator violations have no ground truth
+    in this dataset, so this is a count, not a precision/recall score."""
+    if not severity_counts:
+        print("PolicyEvaluator: no violations flagged.\n")
+        return
+    print("PolicyEvaluator violations (informational — no ground truth to score against):")
+    for severity in ("low", "medium", "high", "phi"):
+        if severity_counts[severity]:
+            print(f"  {severity:<8} {severity_counts[severity]}")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +278,7 @@ def _print_results(
 # CLI
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate de-identification engine")
+    parser = argparse.ArgumentParser(description="Evaluate PII detection engine")
     parser.add_argument(
         "--data",
         default="eval/data/pii_dataset.csv",
