@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: signal-worker-quality
+  namespace: signal
+  labels:
+    app: signal-worker
+    lens: quality
+spec:
+  serviceName: signal-worker-quality   # must match the headless Service in 40_service-metrics.yaml
+  replicas: 1                          # start at 1; use scale-quality.ps1 to change
+  podManagementPolicy: Parallel        # all pods start in parallel, no sequential wait
+  selector:
+    matchLabels:
+      app: signal-worker
+      lens: quality
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: signal-worker
+        lens: quality
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 120   # generous — semantic batches can take minutes
+      containers:
+      - name: worker
+        image: signal-worker:quality
+        imagePullPolicy: IfNotPresent
+        env:
+        # POD_NAME → derived WORKER_PARTITION_INDEX at startup (see run_worker.py)
+        # Keep this entry at /env/0 — scale-quality.ps1 patches /env/1 by index.
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # MUST equal spec.replicas above. scale-quality.ps1 keeps them in sync.
+        - name: WORKER_PARTITION_COUNT
+          value: "1"
+        envFrom:
+        - configMapRef: { name: signal-worker-config }
+        - secretRef:    { name: signal-worker-secrets }
+        ports:
+        - name: metrics
+          containerPort: 8080
+        livenessProbe:
+          # Generous initial delay — startup health check verifies all three
+          # model dirs exist before /healthz returns OK. Fast on a healthy
+          # image (one stat() per dir).
+          httpGet:  { path: /healthz, port: 8080 }
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:  { path: /readyz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          # Sized for full semantic mode (NLI + embedding + relevance loaded).
+          # In SIGNAL_QUALITY_SEMANTIC=0 mode the limits sit unused — same
+          # manifest works either way; flip the env in the ConfigMap.
+          # NLI alone is ~1 GB RAM resident; budget headroom for batch tensors.
+          requests: { cpu: "500m", memory: "2Gi" }
+          limits:   { cpu: "1",    memory: "4Gi" }

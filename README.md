@@ -1,736 +1,634 @@
 # Signal Workers
 
-Production observability workers for the Signal platform. Each lens runs as
-an independent Kubernetes Deployment, reads immutable spans from ClickHouse,
-computes its metrics, and writes the results back. State (per-lens
-high-checkpoint) lives in Postgres; writes are idempotent under restart.
+Per-lens observability workers that read raw spans from ClickHouse, compute derived metrics, and write them back. One lens = one image = one Deployment (or StatefulSet for Safety). Each lens is independently deployable, scalable, and observable.
 
 ```
-signal_raw_spans  ──►  [ lens worker ]  ──►  signal_derived_metrics  ──(MV)──►  signal_aggregated_metrics
-   (what happened)        (compute)              (one row / metric / span)         (1-min rollup buckets)
-                                ▲
-                                │
-                            worker_checkpoints (PG)   ─── one high-checkpoint per lens
+┌──────────────────────┐    poll       ┌─────────────────────────┐
+│  ClickHouse          │ ─────────►    │  Lens Worker            │
+│  signal_raw_spans    │               │  (perf / cost / safety) │
+└──────────────────────┘               │                         │
+        ▲                              │  - Stage 1 gate         │
+        │ INSERT                       │  - Per-span context     │
+        │ (idempotent via              │  - MetricSpec walk      │
+        │  dedup tokens)               │  - Emit derived rows    │
+        │                              └─────────────────────────┘
+┌──────────────────────┐                         │
+│  signal_derived_     │ ◄───────────────────────┘
+│  metrics             │
+│  → mv_agg_base fires │     ┌──────────────────────────────────┐
+│  → aggregated table  │     │  Postgres                        │
+└──────────────────────┘     │  worker_checkpoints (per-slot)   │
+                             │  *_thresholds (toggle cache)     │
+                             │  components (pricing)            │
+                             └──────────────────────────────────┘
 ```
 
-**One worker per lens, one image per lens, one Deployment per lens.** Performance and Cost are CPU-only and tiny. Safety carries the ML stack (Presidio, transformers, fasttext) and the model weights.
+The three lenses available today:
 
-> For *why* it's built this way — the engine vs lens split, the aggregation
-> internals, scoping conventions, design tradeoffs — see **ARCHITECTURE.md**.
+| Lens | Image | Replicas | Notes |
+|---|---|---|---|
+| **Performance** | `signal-worker:performance` | Deployment, 1 | Latency, errors, retries |
+| **Cost** | `signal-worker:cost` | Deployment, 1 | Token spend, waste, pricing from PG |
+| **Safety** | `signal-worker:safety` | StatefulSet, 1–16 | PII + toxicity (ML); horizontally scalable |
 
 ---
 
 ## Table of contents
 
-1. [What's in this repo](#1-whats-in-this-repo)
-2. [Lenses](#2-lenses)
-3. [Prerequisites](#3-prerequisites)
-4. [Quick start (local dev)](#4-quick-start-local-dev)
-5. [Docker images](#5-docker-images)
-6. [Production deployment (Kubernetes)](#6-production-deployment-kubernetes)
-7. [Configuration reference](#7-configuration-reference)
-8. [Operations](#8-operations)
-9. [Data correctness guarantees](#9-data-correctness-guarantees)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Development](#11-development)
+1. [Overview](#1-overview)
+2. [Prerequisites](#2-prerequisites)
+3. [Install](#3-install)
+4. [Configuration](#4-configuration)
+5. [Run live](#5-run-live)
+6. [Run offline (CSV)](#6-run-offline-csv)
+7. [Docker images](#7-docker-images)
+8. [Observability](#8-observability)
+9. [Horizontal scaling](#9-horizontal-scaling)
+10. [Production deployment (K8s)](#10-production-deployment-k8s)
+11. [Data correctness](#11-data-correctness)
+12. [Failure modes](#12-failure-modes)
+13. [Adding a new lens](#13-adding-a-new-lens)
 
 ---
 
-## 1. What's in this repo
+## 1. Overview
+
+Each worker runs a synchronous poll loop:
 
 ```
-signal-workers/
-├── run_worker.py            CLI entrypoint — launches ONE lens per invocation
-├── show_specs.py            print a lens's metric registry as a table
-├── validate_performance.py  offline correctness check vs the mock derived data
-├── migrate_checkpoints.py   one-shot: copy file checkpoints into worker_checkpoints PG table
-├── Dockerfile               builds signal-worker:base (framework only)
-├── Dockerfile.performance   builds signal-worker:performance
-├── Dockerfile.cost          builds signal-worker:cost
-├── Dockerfile.safety        builds signal-worker:safety (extends :base with ML stack)
-├── .env.example             template for local dev (host mode)
-└── signal_worker/
-    ├── config.py            env-driven Pydantic Settings (CH/PG/run-loop/toxicity/PII)
-    ├── base.py              engine: fetch → compute → write → checkpoint
-    ├── spec.py              MetricSpec + SpecWorker (spec-driven engine + PrefillStep pipeline)
-    ├── checkpoint.py        Postgres-backed checkpoint store
-    ├── observability.py     /healthz, /readyz, /metrics HTTP server + Prometheus counters
-    ├── patterns.py          reusable compute patterns (column_latency, ratio, ctx_value, …)
-    ├── predicates.py        reusable "which spans does this apply to" filters
-    ├── pricing.py           PricingCache — Cost lens reads from Postgres components.pricing
-    ├── toggle_cache.py      Stage-1 gate: skip spans with no active threshold
-    ├── utils.py             LRUCache, helpers
-    └── lenses/
-        ├── performance.py   Performance lens — 14 specs
-        ├── cost.py          Cost lens — 22 specs
-        └── safety.py        Safety lens — 4 specs (PII + toxicity + prompt injection + moderation)
+load checkpoint → fetch batch from CH → process → write derived rows → save checkpoint → repeat
 ```
 
-Sibling repos this depends on:
+- **`fetch`**: `SELECT ... FROM signal_raw_spans WHERE recorded_at > $watermark [AND partition_id = $slot] LIMIT $batch_size`
+- **`process`**: Stage 1 gate (drop spans no threshold cares about) → per-span `build_context` → walk `MetricSpec` list → emit rows
+- **`write`**: bulk INSERT with a deterministic `insert_deduplication_token`, so any replay drops silently
+- **`checkpoint`**: UPSERT into Postgres `worker_checkpoints` keyed by `(lens, partition_key)`
 
-- `toxicity/` — toxicity, prompt-injection, and moderation classifiers (fasttext + DeBERTa). Required only by Safety.
-- `PII/` — Presidio-backed PII detection. Required only by Safety.
+Three lenses share the same engine (`signal_worker.base`, `signal_worker.spec`); they differ only by the `MetricSpec` list, their `build_context` function, and (for Safety) the analyzers they wire into the `PrefillStep` pipeline.
 
-Both are installed as editable packages inside the Safety image and not at all inside `:base` / `:performance` / `:cost`.
-
----
-
-## 2. Lenses
-
-### Performance — 14 specs
-
-Reads from `span_type` and `metadata.*`. CPU-only. Suitable for any infra.
-
-Sub-categories:
-
-- **Latency**: `latency`, `time_to_first_token`, `queue_wait_time`, `scheduling_delay`.
-- **Throughput** (read-time, not emitted): `throughput`, `concurrency`.
-- **Errors**: `error_rate`, `timeout_count`.
-- **Retry / resilience**: `retry_count`, `retry_delay`, `rate_limit_hit`, `rate_limit_wait`.
-- **Batch / records**: `records_processed`, `token_throughput`.
-
-Three metrics are **read-time** gauges/rates (`throughput`, `concurrency`, `messages_in_flight`) — declared with `aggregation_derived()` and not emitted per span.
-
-### Cost — 22 specs
-
-Reads from `span_type IN (model_call, embedding, tool_call, retrieval)` and pulls component pricing from Postgres on a TTL cache. CPU-only.
-
-Sub-categories:
-
-- **Token costs**: `input_tokens_cost`, `output_tokens_cost`, `total_tokens_cost`, `cached_tokens_cost`.
-- **Monetary**: `monetary_cost`, `monetary_input_cost`, `monetary_output_cost`.
-- **Tool / embedding / retrieval costs**: `tool_api_cost`, `embedding_cost`.
-- **Waste & efficiency**: `wasted_cost`, `retry_cost`, `cache_savings`, `cost_per_record`, `cost_per_outcome`.
-- **Budget tracking**: `budget_utilization`, `burn_rate`.
-
-`span_types = ["model_call", "embedding", "tool_call", "retrieval"]` is pushed into `fetch_batch`'s SQL so the worker never reads spans it can't bill.
-
-### Safety — 4 specs
-
-The expensive lens. Loads ML models lazily and runs batched inference.
-
-| Spec | Pattern | Models involved |
-|---|---|---|
-| `pii_count` | Presidio NER over input + output | `gravitee-io/bert-small-pii-detection` |
-| `pii_detected` | `pii_count > 0` | (same) |
-| `prompt_injection_detected` | FastText router → DeBERTa PI head | `Krishagarwal314/safety-fasttext-router`, `Krishagarwal314/safety-prompt-injection-onnx-int8` |
-| `toxicity_detected` | FastText router → DeBERTa moderation head | `Krishagarwal314/safety-fasttext-router`, `Krishagarwal314/safety-moderation` |
-
-Pipeline per batch:
-
-1. **Stage 1 gate** — drop spans with no active safety threshold.
-2. **FastText router** — single forward pass over all unique input+output texts. Handles ~99% of traffic cheaply.
-3. **DeBERTa PI head** — only on texts the router escalates as possibly attack.
-4. **DeBERTa moderation head** — only on texts the router escalates as possibly harmful/sexual.
-5. **Presidio NER** — runs in a threadpool across batch_size concurrent texts.
-
-Models load **lazily on first use**, so a pod with only `pii_detected` toggles active never loads the toxicity models.
+For architecture, design tradeoffs, and rationale, see **`ARCHITECTURE.md`**.
 
 ---
 
-## 3. Prerequisites
+## 2. Prerequisites
 
-### Software
+- Python 3.11+
+- ClickHouse reachable (default `localhost:8123`) with the Signal schema applied; see `infra/`
+- Postgres reachable (default `localhost:5432`) with the v5 schema seeded and the `worker_checkpoints` table created
+- Docker / Docker Compose for local infra
+- Kubernetes cluster + `kubectl` for production deployment (StatefulSet, ConfigMap, Secret, Service)
+- Disk space: ~6 GB for the Safety Docker image (bakes in ML models + HF cache)
 
-| Component | Version | Purpose |
-|---|---|---|
-| Python | 3.11+ | Worker runtime |
-| Docker | with BuildKit | Image builds (`DOCKER_BUILDKIT=1`) |
-| ClickHouse | 24.x+ | Span store + derived/aggregated metrics |
-| Postgres | 14+ | Registry, bindings, thresholds, **worker_checkpoints** |
-| HuggingFace account | with a token | One-time, build-time only, for Safety image |
+---
 
-### Infrastructure schemas
+## 3. Install
 
-The workers expect these tables to exist:
-
-**ClickHouse** (`infra/clickhouse/init/00_schema.sql`):
-- `signal_raw_spans` (MergeTree) — read-only for workers.
-- `signal_derived_metrics` (MergeTree, with `non_replicated_deduplication_window = 1000`) — workers write here.
-- `signal_aggregated_metrics` (AggregatingMergeTree) — populated by the `mv_agg_base` materialized view, **never written to by workers**.
-
-**Postgres**:
-- `solutions`, `endpoints`, `workflows`, `agents`, `components`, `bindings` — entity registry.
-- `performance_thresholds`, `quality_thresholds`, `cost_thresholds`, `safety_thresholds`, `outcomes_thresholds` — toggle gates (read by `ToggleCache`).
-- `components.pricing` JSONB — read by Cost's `PricingCache`.
-- **`worker_checkpoints`** (`infra/postgres/init/03_worker_checkpoints.sql`) — high-checkpoint per lens.
-
-Run the infra Docker compose stack to get all of the above:
+For local dev (host-side):
 
 ```powershell
-cd infra
-docker compose up -d
-```
-
----
-
-## 4. Quick start (local dev)
-
-For host-mode development against a local infra stack.
-
-### 4.1 Install Python deps
-
-From the repo root:
-
-```powershell
+cd E:\8thelement\Signal
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 ```
 
-The `-e ./PII` and `-e ./toxicity` references in `requirements.txt` install the sibling packages editable.
+This installs the worker framework deps (`clickhouse-connect`, `psycopg`, `pydantic-settings`, `prometheus-client`), plus editable installs of the sibling `PII/` and `toxicity/` packages used by the Safety lens.
 
-### 4.2 Configure
-
-```powershell
-cd signal-workers
-copy .env.example .env
-notepad .env
-```
-
-Minimum required vars (defaults work for the `infra/` compose stack):
-
-```bash
-CH_HOST=localhost
-CH_PORT=8123
-CH_DB=signal
-
-PG_DSN=postgresql://signal:signal@localhost:5432/signal
-
-# Safety lens — required if you'll run safety locally
-HF_TOKEN=hf_...
-SIGNAL_TOXICITY_MODELS_ROOT=E:/8thelement/Signal/toxicity/models
-```
-
-See [S7 Configuration reference](#7-configuration-reference) for the full list.
-
-### 4.3 Pre-download Safety models (one-time, if running safety on host)
-
-```powershell
-cd ..\toxicity
-toxicity-observe download --config configs/runtime.yaml
-python -c "from transformers import pipeline; pipeline('ner', model='gravitee-io/bert-small-pii-detection', aggregation_strategy='first')"
-cd ..\signal-workers
-```
-
-These are baked into the Docker `:safety` image automatically, so this step is only for host-mode dev runs.
-
-### 4.4 Run a lens
-
-```powershell
-python run_worker.py --worker performance --once
-python run_worker.py --worker cost --once
-python run_worker.py --worker safety --once
-
-# Continuous (production-like):
-python run_worker.py --worker performance
-
-# Show the metric registry without connecting to anything:
-python run_worker.py --worker performance --specs
-```
-
-### 4.5 Verify in ClickHouse
-
-```sql
--- per-metric row counts the worker just wrote
-SELECT metric, count(), max(ts) FROM signal_derived_metrics
-GROUP BY metric ORDER BY metric;
-
--- rolled-up p95 latency for the last hour
-SELECT
-  quantilesTDigestMerge(0.95)(quantiles) AS p95
-FROM signal_aggregated_metrics
-WHERE metric = 'latency' AND ts > now() - INTERVAL 1 HOUR;
-```
+For container/production builds, see [§7 Docker images](#7-docker-images).
 
 ---
 
-## 5. Docker images
+## 4. Configuration
 
-### 5.1 Image hierarchy
+All settings are environment-driven via `signal_worker.config.Config` (a pydantic-settings `BaseSettings`). Defaults are sensible for local dev. Override via env vars or a `.env` file.
 
-```
-                        python:3.11-slim
-                               │
-                               ▼
-                  signal-worker:base  (~400 MB, internal)
-                    │           │           │
-        ┌───────────┘           │           └───────────┐
-        ▼                       ▼                       ▼
- :performance              :cost                     :safety
- (~400 MB)                 (~400 MB)                 (~5.5 GB, + ML stack + model weights)
-```
+### Datastore connections
 
-`:base` is the framework: Python venv, clickhouse-connect, psycopg, pydantic-settings, the `signal_worker/` package, and `run_worker.py`. It is **not deployed directly**; only the three child images are.
-
-`:performance` and `:cost` are `:base` + a different `ENTRYPOINT`. Identical byte content otherwise — the only difference is the `--worker <name>` argument baked in.
-
-`:safety` extends `:base` with the heavy stack: torch CPU, transformers, presidio-analyzer, spaCy + en_core_web_sm, the editable `toxicity/` and `PII/` packages, the model weights at `/opt/models`, and the HuggingFace cache at `/opt/hf-cache`.
-
-### 5.2 Build order
-
-`:base` must exist before the child images can `FROM` it.
-
-```powershell
-cd E:\8thelement\Signal     # repo root, NOT signal-workers/
-$env:DOCKER_BUILDKIT = "1"
-$env:HF_TOKEN = "hf_..."     # only needed for :safety
-
-# 1. base
-docker build -f signal-workers/Dockerfile -t signal-worker:base .
-
-# 2. performance + cost (~5 seconds each)
-docker build -f signal-workers/Dockerfile.performance -t signal-worker:performance .
-docker build -f signal-workers/Dockerfile.cost        -t signal-worker:cost .
-
-# 3. safety (~5 min cold, ~30s warm if model layers are cached)
-docker build --secret id=hf_token,env=HF_TOKEN `
-    -f signal-workers/Dockerfile.safety -t signal-worker:safety .
-```
-
-There's a convenience script at `signal-workers/build-all.ps1` that does all four in order.
-
-### 5.3 Image internals
-
-| Path | What's there |
-|---|---|
-| `/opt/venv` | The Python venv (all PyPI deps + editable installs) |
-| `/opt/signal/PII` | Editable install of the PII package (Safety only) |
-| `/opt/signal/toxicity` | Editable install of the toxicity package (Safety only) |
-| `/opt/models/fasttext` | FastText router weights |
-| `/opt/models/transformers/prompt_injection` | DeBERTa PI head |
-| `/opt/models/transformers/moderation` | DeBERTa moderation head |
-| `/opt/models/onnx_int8/prompt_injection` | ONNX int8 PI head (CPU optimized) |
-| `/opt/hf-cache` | HuggingFace cache containing the Presidio NER model |
-| `/app` | `signal_worker/` package + `run_worker.py` |
-
-### 5.4 Running locally against your infra
-
-Each image has `ENTRYPOINT ["python", "run_worker.py", "--worker", "<lens>"]` baked in, so `docker run` extras are appended as args.
-
-Inside the container, `localhost` is the container itself — use `host.docker.internal` (Docker Desktop) for the host's ClickHouse and Postgres. Maintain a separate `signal-workers/.env.docker` with the host overrides:
-
-```bash
-# .env.docker — same as .env except:
-CH_HOST=host.docker.internal
-PG_DSN=postgresql://signal:signal@host.docker.internal:5432/signal
-```
-
-> **Inline comments in `.env.docker` will break it.** Docker's `--env-file` parser does NOT strip inline comments. Put comments on their own lines.
-
-Then run:
-
-```powershell
-docker run --rm `
-  --env-file signal-workers\.env.docker `
-  -p 8080:8080 `
-  signal-worker:performance --once
-
-docker run --rm `
-  --env-file signal-workers\.env.docker `
-  -p 8080:8080 `
-  signal-worker:cost --once
-
-docker run --rm `
-  --env-file signal-workers\.env.docker `
-  -p 8080:8080 `
-  signal-worker:safety --once
-```
-
-`-p 8080:8080` exposes the observability port so you can `curl http://localhost:8080/metrics` while the worker runs.
-
-The `signal-workers/run-worker.ps1` helper wraps the long invocation:
-
-```powershell
-.\signal-workers\run-worker.ps1 -Worker performance -Once
-```
-
----
-
-## 6. Production deployment (Kubernetes)
-
-### 6.1 Topology
-
-Three Deployments, three image refs, one replica each:
-
-```
-Namespace: signal
-  ConfigMap  signal-worker-config      (non-secret env)
-  Secret     signal-worker-secrets     (PG_DSN, CH_PASSWORD)
-  Deployment signal-worker-performance image=signal-worker:performance, replicas=1
-  Deployment signal-worker-cost        image=signal-worker:cost,        replicas=1
-  Deployment signal-worker-safety      image=signal-worker:safety,      replicas=1
-  Service    signal-worker-metrics     selector=app=signal-worker, port=8080
-```
-
-Each Deployment specifies:
-
-- **Liveness probe**: `GET /healthz` on port 8080 (returns 200 if the process is alive).
-- **Readiness probe**: `GET /readyz` on port 8080 (returns 200 once the poll loop has started).
-- **`terminationGracePeriodSeconds: 60`** — long enough for an in-flight batch to write + checkpoint cleanly on SIGTERM.
-- **Resource requests/limits** — modest for Performance/Cost, generous CPU + 4Gi memory for Safety.
-
-The Service is purely for Prometheus scraping discovery. Workers don't serve HTTP traffic to other services.
-
-### 6.2 Pushing images to a registry
-
-For GCP Artifact Registry:
-
-```powershell
-# Tag for the registry
-docker tag signal-worker:base        REGION-docker.pkg.dev/PROJECT/signal/signal-worker:base
-docker tag signal-worker:performance REGION-docker.pkg.dev/PROJECT/signal/signal-worker:performance
-docker tag signal-worker:cost        REGION-docker.pkg.dev/PROJECT/signal/signal-worker:cost
-docker tag signal-worker:safety      REGION-docker.pkg.dev/PROJECT/signal/signal-worker:safety
-
-# Authenticate
-gcloud auth configure-docker REGION-docker.pkg.dev
-
-# Push
-docker push REGION-docker.pkg.dev/PROJECT/signal/signal-worker:base
-docker push REGION-docker.pkg.dev/PROJECT/signal/signal-worker:performance
-docker push REGION-docker.pkg.dev/PROJECT/signal/signal-worker:cost
-docker push REGION-docker.pkg.dev/PROJECT/signal/signal-worker:safety
-```
-
-Adjust REGION (e.g. `us-central1`) and PROJECT to match your environment.
-
-### 6.3 Applying manifests
-
-K8s manifests live in `infra/k8s/`. Once written:
-
-```bash
-kubectl apply -f infra/k8s/namespace.yaml
-kubectl apply -f infra/k8s/configmap.yaml
-kubectl apply -f infra/k8s/secret.yaml          # or use a secrets manager
-kubectl apply -f infra/k8s/deployment-performance.yaml
-kubectl apply -f infra/k8s/deployment-cost.yaml
-kubectl apply -f infra/k8s/deployment-safety.yaml
-kubectl apply -f infra/k8s/service.yaml
-```
-
-Verify:
-
-```bash
-kubectl -n signal get pods
-kubectl -n signal logs deploy/signal-worker-performance --tail 50
-kubectl -n signal port-forward svc/signal-worker-metrics 8080:8080
-curl http://localhost:8080/metrics | grep signal_worker
-```
-
-### 6.4 First-time deployment checklist
-
-1. ClickHouse schema applied, including `non_replicated_deduplication_window = 1000` on `signal_derived_metrics`.
-2. Postgres schema applied, including `worker_checkpoints` table.
-3. If migrating from a previous file-based deployment, run `migrate_checkpoints.py` against PG before pods start (so they don't replay from epoch).
-4. Images pushed to your registry.
-5. Secret created with valid `PG_DSN` and `CH_PASSWORD`.
-6. HuggingFace token NOT in the secret — it's build-time only.
-7. ConfigMap populated with `CH_HOST`, `CH_PORT`, `CH_DB`, `WORKER_BATCH`, `WORKER_POLL_SEC`, etc.
-
-### 6.5 Scaling considerations
-
-**Today: 1 replica per lens.** Multi-replica of the same lens would cause both pods to fetch the same spans and double-process them. The dedup tokens prevent double-counts in ClickHouse, but the wasted compute is still real.
-
-**Scaling Safety later** requires partitioned consumption — each replica owns a hash-partition of `trace_id`. Designed-for in the schema (`worker_checkpoints.partition_key` is already a column, hardcoded `'default'` for now). Implementation deferred until throughput demands it.
-
----
-
-## 7. Configuration reference
-
-All configuration is environment-driven via `signal_worker/config.py` (Pydantic Settings). Local-friendly defaults; production overrides via ConfigMap + Secret.
-
-### 7.1 Connection settings
-
-| Variable | Default | Used by | Purpose |
+| Env var | Default | Used by | Purpose |
 |---|---|---|---|
 | `CH_HOST` | `localhost` | all | ClickHouse host |
 | `CH_PORT` | `8123` | all | ClickHouse HTTP port |
 | `CH_DB` | `signal` | all | ClickHouse database |
 | `CH_USER` | `default` | all | ClickHouse user |
-| `CH_PASSWORD` | `` | all | ClickHouse password |
-| `PG_DSN` | `postgresql://postgres@localhost:5432/signal` | all (toggles, checkpoints; Cost reads pricing) | Postgres DSN |
+| `CH_PASSWORD` | `""` | all | ClickHouse password |
+| `PG_DSN` | `postgresql://postgres@localhost:5432/signal` | cost + safety | Postgres DSN (pricing, thresholds, checkpoints) |
 
-### 7.2 Worker run loop
+### Run loop
 
-| Variable | Default | Purpose |
+| Env var | Default | Purpose |
 |---|---|---|
-| `WORKER_BATCH` | `5000` | Max spans fetched per batch |
-| `WORKER_POLL_SEC` | `2.0` | Sleep between empty polls (continuous mode) |
-| `SIGNAL_TOGGLE_TTL` | `300` | Seconds between PG refreshes of the toggle cache |
+| `WORKER_BATCH` | `5000` | Spans fetched per batch (per slot) |
+| `WORKER_POLL_SEC` | `2.0` | Idle backoff between empty fetches |
+| `SIGNAL_TOGGLE_TTL` | `300` | Toggle cache refresh interval (seconds) |
+| `SIGNAL_PRICING_TTL` | `300` | Pricing cache refresh interval (seconds; Cost lens only) |
 
-### 7.3 Safety — Toxicity / Prompt Injection / Moderation
+### Horizontal scaling (Phase 4.3)
 
-| Variable | Default | Purpose |
+| Env var | Default | Purpose |
 |---|---|---|
-| `SIGNAL_TOXICITY_MODELS_ROOT` | `/opt/models` (in container) | Base path for the four model artifacts |
-| `SIGNAL_TOXICITY_FASTTEXT_PATH` | `fasttext/router_head.ftz` | Relative to MODELS_ROOT |
-| `SIGNAL_TOXICITY_PI_PATH` | `transformers/prompt_injection` | Relative to MODELS_ROOT |
-| `SIGNAL_TOXICITY_PI_ONNX_PATH` | `onnx_int8/prompt_injection` | Relative to MODELS_ROOT |
-| `SIGNAL_TOXICITY_MOD_PATH` | `transformers/moderation` | Relative to MODELS_ROOT |
+| `WORKER_PARTITION_INDEX` | `0` | This pod's index (0-based). Auto-derived from `POD_NAME` in K8s |
+| `WORKER_PARTITION_COUNT` | `1` | Total pods sharing the slot space. Must match StatefulSet `replicas` |
+| `WORKER_PARTITION_TOTAL_SLOTS` | `16` | Size of the fixed slot space (matches `cityHash64 % N` on `signal_raw_spans.partition_id`) |
+
+Defaults (`COUNT=1`, `INDEX=0`) preserve single-pod behavior — Performance and Cost stay at the defaults; only Safety scales.
+
+### Observability (Phase 5.1)
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `OBSERVABILITY_PORT` | `8080` | HTTP port for `/healthz` `/readyz` `/metrics` |
+
+### Safety-specific (Safety lens only)
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | HF model id for PII NER |
+| `SIGNAL_PII_BATCH` | `4` | ThreadPool width for Presidio analyze_batch |
+| `SIGNAL_PII_CACHE_MAX` | `20000` | LRU cap on per-worker PII content cache |
+| `SIGNAL_TOXICITY_MODELS_ROOT` | `/opt/models` | Base path for the 4 toxicity model artifacts |
 | `SIGNAL_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
-| `SIGNAL_TOXICITY_MAX_LENGTH` | `128` | Token max for transformers |
-| `SIGNAL_TOXICITY_FP16` | `true` | Use fp16 when device=cuda |
-| `SIGNAL_TOXICITY_BATCH_SIZE` | `32` | Texts per transformer forward pass |
-| `SIGNAL_TOXICITY_ATTACK_ROUTE` | `0.05` | FastText threshold to escalate to PI BERT |
-| `SIGNAL_TOXICITY_MODERATION_ROUTE` | `0.05` | FastText threshold to escalate to Moderation BERT |
-| `SIGNAL_TOXICITY_FAST_ALLOW` | `0.02` | FastText threshold to short-circuit as safe |
-| `SIGNAL_TOXICITY_FASTTEXT_DIRECT` | `0.97` | Above this, trust FastText and skip BERT |
-| `SIGNAL_TOXICITY_PI_REVIEW` | `0.5` | PI score threshold for `prompt_injection_detected` |
-| `SIGNAL_TOXICITY_HARMFUL_REVIEW` | `0.5` | Moderation harmful score threshold |
-| `SIGNAL_TOXICITY_SEXUAL_REVIEW` | `0.5` | Moderation sexual score threshold |
-| `SIGNAL_TOXICITY_CACHE_MAX` | `20000` | Per-worker content-hash result cache |
+| `SIGNAL_TOXICITY_BATCH_SIZE` | `32` | Worker-side batched inference width |
+| `SIGNAL_TOXICITY_FAST_ALLOW` | `0.02` | FastText threshold below which BERT is skipped |
+| `SIGNAL_TOXICITY_PI_REVIEW` | `0.50` | Prompt-injection review threshold |
+| `SIGNAL_TOXICITY_HARMFUL_REVIEW` | `0.50` | Harmful-content review threshold |
 
-### 7.4 Safety — PII (Presidio)
+Full list in `signal_worker/config.py`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | HuggingFace model id (pre-cached in image) |
-| `SIGNAL_PII_BATCH_SIZE` | `4` | ThreadPoolExecutor width for `analyze_batch` |
-| `SIGNAL_PII_CACHE_MAX` | `20000` | Per-worker content cache |
+### `.env` files
 
-### 7.5 Observability
+Local dev:
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OBSERVABILITY_PORT` | `8080` | Port for `/healthz`, `/readyz`, `/metrics` |
-| `HOSTNAME` | (from container) | Recorded as `updated_by` in `worker_checkpoints` |
+```bash
+# signal-workers/.env
+CH_HOST=localhost
+CH_PORT=8123
+PG_DSN=postgresql://signal:signal@localhost:5432/signal
+WORKER_BATCH=5000
+```
 
-### 7.6 Build-time only
+Docker run:
 
-| Variable | Used by | Purpose |
-|---|---|---|
-| `HF_TOKEN` | `Dockerfile.safety` (BuildKit secret) | Auth for private HuggingFace model repos at image build |
+```bash
+# signal-workers/.env.docker
+CH_HOST=host.docker.internal
+CH_PORT=8123
+PG_DSN=postgresql://signal:signal@host.docker.internal:5432/signal
+WORKER_BATCH=5000
+```
 
-Never set `HF_TOKEN` at runtime. It does not appear in any image layer.
+K8s uses a ConfigMap + Secret instead; see [§10](#10-production-deployment-k8s).
 
 ---
 
-## 8. Operations
+## 5. Run live
 
-### 8.1 Health checks
+Against the local CH/PG stack:
 
-Each worker pod exposes three HTTP endpoints on `OBSERVABILITY_PORT` (default 8080):
+```powershell
+# Single lens, continuous poll loop
+python run_worker.py --worker performance
+python run_worker.py --worker cost
+python run_worker.py --worker safety
 
-| Endpoint | Returns | Used by |
-|---|---|---|
-| `/healthz` | 200 if the process is alive | K8s liveness probe |
-| `/readyz` | 200 once the poll loop has started, else 503 | K8s readiness probe; gates traffic during rolling updates |
-| `/metrics` | Prometheus exposition format | Prometheus scrape |
+# One batch, then exit (smoke test, CI, manual debugging)
+python run_worker.py --worker performance --once
 
-```bash
-curl http://localhost:8080/healthz
-# ok
-
-curl http://localhost:8080/readyz
-# ready  (or "not ready" with 503 during startup)
-
-curl http://localhost:8080/metrics | head -40
-# # HELP signal_worker_batches_total Total worker batches processed.
-# ...
+# All three lenses in one process — three threads, one PG/CH connection set
+# (intended for local dev; production runs each lens in its own container)
+python run_worker.py --worker all
 ```
 
-### 8.2 Prometheus metrics
+Stop with `Ctrl+C`. Workers handle SIGINT/SIGTERM gracefully — the in-flight batch completes, the checkpoint is saved, then exit.
 
-All metrics are labeled by `lens`:
+---
 
-| Metric | Type | Meaning |
+## 6. Run offline (CSV)
+
+For local development and lens validation, run against an exported spans CSV instead of ClickHouse. Same `compute()` code path; no DB connections required.
+
+```powershell
+python run_worker.py --worker safety --csv ./samples/spans.csv --out ./out/safety.csv
+```
+
+This is how every new lens is regression-tested before being deployed.
+
+---
+
+## 7. Docker images
+
+Four images, all built from `signal-workers/` Dockerfiles with build context at the repo root.
+
+| Image | Dockerfile | Size | Purpose |
+|---|---|---|---|
+| `signal-worker:base` | `Dockerfile` | ~400 MB | Internal framework image. Not deployed directly |
+| `signal-worker:performance` | `Dockerfile.performance` | ~400 MB | Performance lens entrypoint over `:base` |
+| `signal-worker:cost` | `Dockerfile.cost` | ~400 MB | Cost lens entrypoint over `:base` |
+| `signal-worker:safety` | `Dockerfile.safety` | ~5.5 GB | Safety lens — extends `:base` with PyTorch, transformers, Presidio, spaCy, the 4 toxicity model artifacts (~1.5 GB), and the PII NER model (~220 MB) |
+
+Build order matters — `:base` first, then the child images that `FROM` it.
+
+```powershell
+cd E:\8thelement\Signal
+$env:DOCKER_BUILDKIT = "1"
+
+# 1. Base (framework + deps)
+docker build -f signal-workers/Dockerfile -t signal-worker:base .
+
+# 2. Performance and Cost (just set the entrypoint)
+docker build -f signal-workers/Dockerfile.performance -t signal-worker:performance .
+docker build -f signal-workers/Dockerfile.cost        -t signal-worker:cost .
+
+# 3. Safety (heavy ML stack + model downloads — pass HF_TOKEN as BuildKit secret)
+$env:HF_TOKEN = "hf_..."
+docker build --secret id=hf_token,env=HF_TOKEN -f signal-workers/Dockerfile.safety -t signal-worker:safety .
+```
+
+Run any of them with `--env-file`:
+
+```powershell
+docker run --rm `
+  --env-file signal-workers\.env.docker `
+  -p 8080:8080 `
+  signal-worker:safety
+```
+
+The `-p 8080:8080` exposes the observability endpoints (next section).
+
+---
+
+## 8. Observability
+
+Every worker process runs an HTTP server on port 8080 (configurable via `OBSERVABILITY_PORT`) with three endpoints.
+
+### Endpoints
+
+| Endpoint | Returns | Used for |
 |---|---|---|
-| `signal_worker_batches_total{lens,result}` | counter | result ∈ `success | error | empty` |
-| `signal_worker_spans_processed_total{lens}` | counter | Spans fetched from ClickHouse |
-| `signal_worker_rows_emitted_total{lens}` | counter | Derived rows written |
-| `signal_worker_skipped_at_gate_total{lens}` | counter | Spans dropped at Stage 1 |
-| `signal_worker_batch_duration_seconds{lens}` | histogram | `process_batch()` wall-clock |
-| `signal_worker_write_duration_seconds{lens}` | histogram | ClickHouse insert wall-clock |
-| `signal_worker_checkpoint_lag_seconds{lens}` | gauge | now − last span's `recorded_at` |
+| `GET /healthz` | `200 ok` (while process is alive) | K8s liveness probe |
+| `GET /readyz` | `200 ready` once `run_poll` starts; `503 not ready` before | K8s readiness probe + Service routing during rolling updates |
+| `GET /metrics` | Prometheus exposition format | Scrape target |
 
-Useful queries:
+Quick checks (from the host, while a worker is running):
+
+```powershell
+curl.exe http://localhost:8080/healthz
+curl.exe http://localhost:8080/readyz
+curl.exe http://localhost:8080/metrics | findstr signal_worker
+```
+
+> PowerShell aliases bare `curl` to `Invoke-WebRequest`, which is flaky on chunked responses. Use `curl.exe` (Windows 10+ ships it).
+
+### Metrics
+
+All counters / gauges / histograms are labeled by `(lens, slot)`. For unpartitioned lenses (Performance, Cost, or Safety running at `WORKER_PARTITION_COUNT=1`), `slot="all"`. For partitioned lenses, each slot the pod owns produces its own label series.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `signal_worker_batches_total` | counter | `lens, slot, result` | `result` ∈ `success` / `error` / `empty` |
+| `signal_worker_spans_processed_total` | counter | `lens, slot` | Spans fetched from CH |
+| `signal_worker_rows_emitted_total` | counter | `lens, slot` | Derived rows written |
+| `signal_worker_skipped_at_gate_total` | counter | `lens, slot` | Spans dropped at Stage 1 |
+| `signal_worker_batch_duration_seconds` | histogram | `lens, slot` | `process_batch()` wall-clock |
+| `signal_worker_write_duration_seconds` | histogram | `lens, slot` | CH insert wall-clock |
+| `signal_worker_checkpoint_lag_seconds` | gauge | `lens, slot` | `now − last_processed_span.recorded_at` |
+
+### Common queries
 
 ```promql
-# How fast is each lens keeping up with spans?
-rate(signal_worker_spans_processed_total[5m])
+# Are workers healthy?
+rate(signal_worker_batches_total{result="success"}[5m]) by (lens)
 
-# Safety lag — alert if it climbs above 5 minutes
-signal_worker_checkpoint_lag_seconds{lens="safety"} > 300
+# Are we keeping up?
+signal_worker_checkpoint_lag_seconds
 
-# p95 batch latency per lens
-histogram_quantile(0.95, rate(signal_worker_batch_duration_seconds_bucket[5m]))
+# Throughput per slot — useful for spotting hot slots
+rate(signal_worker_spans_processed_total[5m]) by (lens, slot)
 
-# Worker crash rate
-rate(signal_worker_batches_total{result="error"}[5m]) > 0
+# Error rate
+rate(signal_worker_batches_total{result="error"}[5m]) by (lens) /
+rate(signal_worker_batches_total[5m]) by (lens)
 
-# Effectiveness of the Stage 1 gate
-rate(signal_worker_skipped_at_gate_total[5m])
-  / rate(signal_worker_spans_processed_total[5m])
+# Per-lens p95 batch latency
+histogram_quantile(0.95,
+  rate(signal_worker_batch_duration_seconds_bucket[5m])
+) by (lens)
 ```
 
-### 8.3 Logs
+### Scaling signal
 
-stdout-only, structured-ish. The notable log lines per batch (Performance lens example):
+`signal_worker_checkpoint_lag_seconds{lens="safety"}` is the input for an HPA on the Safety StatefulSet (when you're ready to automate scaling). Three regimes:
 
-```
-Fetched 3160 spans newer than 2026-06-14 09:14:23.117
-
-[performance] batch=3160 processed=2890 skipped_at_gate=270 emitted=18420
-[performance] 3160 spans -> 18420 metrics (wm=2026-06-14 09:18:51.842 token=performance:2026-06-14 09:18:51.842:3160)
-```
-
-Safety adds per-step timing:
-
-```
-[safety:pii] analyzing 384 unique texts from 412 spans
-[safety:router] FastText over 412 unique texts
-[safety:pi] FastText cleared all 412 texts; PI BERT not loaded
-[safety:mod] Moderation BERT over 12 of 412 routed texts
-[safety] latency | total=2840.1ms | pii=2410.0ms (384 texts) | toxicity_router=180.0ms (412 texts) | prompt_injection=0.0ms (0 texts) | moderation=240.0ms (12 texts) | emit=10.1ms | rows=824
-```
-
-### 8.4 Graceful shutdown
-
-SIGTERM → `BaseWorker.stop()` sets a threading event → the poll loop exits at the next batch boundary. Any in-flight batch completes its `write` and `save_checkpoint` before the process exits.
-
-K8s gives `terminationGracePeriodSeconds: 60` for this drain. If a batch is still running past 60s, K8s sends SIGKILL; on restart, the dedup token guarantees no double-write.
-
-### 8.5 Restart and resume
-
-Pods are stateless. On restart:
-
-1. `load_checkpoint()` reads the saved checkpoint from `worker_checkpoints` in Postgres.
-2. `fetch_batch(since=checkpoint, ...)` returns spans newer than that.
-3. Compute → write → save_checkpoint as normal.
-
-If the prior shutdown happened mid-batch:
-- If between fetch and write: nothing was written; re-fetch is harmless.
-- If between write and save_checkpoint: re-fetch returns the same spans, write recomputes the same dedup token, ClickHouse drops the duplicate insert and the MV doesn't fire. No double-count.
-
-### 8.6 Routine ops tasks
-
-**Rewind a lens's checkpoint** (e.g. to reprocess a window):
-
-```sql
-UPDATE worker_checkpoints
-SET checkpoint = '2026-06-14 00:00:00.000', updated_by = 'manual-rewind'
-WHERE lens = 'safety';
-```
-
-The next poll cycle re-fetches from there. The dedup window protects against doubling the source side; the aggregated table can be cleaned by reprocessing into a different MV if the rewind is large.
-
-**Promote a new image version** (rolling restart):
-
-```bash
-kubectl -n signal set image deploy/signal-worker-safety worker=REGION-docker.pkg.dev/PROJECT/signal/signal-worker:safety-v1.2
-```
-
-K8s rolls one pod at a time. New pod starts, becomes ready, old pod gets SIGTERM, drains its batch, exits.
-
-**Check what each lens last did**:
-
-```sql
-SELECT lens, checkpoint, updated_at, updated_by
-FROM worker_checkpoints
-ORDER BY lens;
-```
-
----
-
-## 9. Data correctness guarantees
-
-### 9.1 Append-only writes
-
-Workers only insert into `signal_derived_metrics`. They never UPDATE, DELETE, or touch `signal_aggregated_metrics`. The materialized view does the aggregation automatically.
-
-### 9.2 Idempotency via dedup tokens
-
-Each batch is written with `insert_deduplication_token = "<lens>:<newest_recorded_at>:<batch_size>"`. ClickHouse remembers the last 1000 tokens per table (`non_replicated_deduplication_window = 1000`). A retried write with a matching token is dropped silently and **the MV does not fire** — so the rollup table also stays consistent.
-
-This means:
-
-- ✅ **Crash between write and save_checkpoint**: safe. Re-fetch produces the same token; CH drops the insert.
-- ✅ **Pod restart mid-loop**: safe. Same mechanism.
-- ✅ **Manual replay** (e.g. rewinding a checkpoint to backfill a fix): partially safe. The dedup window covers ~the last 1000 batches' tokens. If you rewind further back than that, expect duplicates in the source table; query with `FINAL` or aggregate-with-dedup.
-
-### 9.3 Per-lens isolation
-
-Each lens has its own checkpoint row in `worker_checkpoints`. A crash, lag, or rewind in Safety does not affect Performance or Cost. Each lens also has its own image, ConfigMap-shared env, and Deployment.
-
-### 9.4 Known caveats
-
-- **Span-boundary tie**: `recorded_at > wm LIMIT N` can skip rows that share the boundary timestamp if the tie spans a batch edge. Mitigated by `WORKER_BATCH = 5000`; a true fix is `(recorded_at, span_id)` cursor pagination, deferred.
-- **No exactly-once across CH and PG**: the dedup token gives effective once-per-row in ClickHouse, but checkpoint advancement and CH writes are two operations. The token closes the only practical window where this matters.
-
----
-
-## 10. Troubleshooting
-
-| Symptom | Likely cause | Fix |
+| Lag pattern | What it means | Action |
 |---|---|---|
-| `Fetched 0 spans newer than 1970-01-01` repeatedly | New lens with no checkpoint row in PG | Expected on first run; will backfill from epoch. Migrate file checkpoints if you have any: `python migrate_checkpoints.py --state-dir ../state-dir` |
-| `Connection refused` to `host.docker.internal:8123` | Running container against host CH but `CH_HOST=localhost` in `.env.docker` | Set `CH_HOST=host.docker.internal` (Docker Desktop) or use the actual host IP |
-| Pydantic ValidationError parsing int env var | Inline comments in `.env.docker` (Docker doesn't strip them like python-dotenv does) | Move comments to their own lines; never on the same line as a value |
-| `RuntimeError: Model 'gravitee-io/...' is not cached locally` | PII NER model wasn't pre-cached in the Safety image | Confirm the `python -c "from transformers import pipeline; pipeline('ner', ...)"` step is in `Dockerfile.safety` Stage 1 |
-| Image is 9+ GB | `.dockerignore` not being read at build context root | `.dockerignore` must be at repo root (`E:\8thelement\Signal\.dockerignore`), not inside `signal-workers/` |
-| `numpy._core._exceptions._ArrayMemoryError` from fasttext | NumPy 2.x incompat with old `fasttext-wheel` | Use `fasttext-numpy2-wheel` (already in toxicity deps); on Windows host you may need a manual patch — see toxicity README |
-| `[performance] rows=0` despite spans being present | No active threshold rows in Postgres for the entity path the spans belong to | Insert at least one row in `performance_thresholds` (or whichever lens's table) matching the span's solution_id / scope |
-| Pod stuck in `Pending` | Insufficient resources on the node | Check `kubectl describe pod` — Safety needs ~4Gi memory and ~1 vCPU |
-| `/readyz` returns 503 forever | `run_poll` failed to start (look for stack trace in logs) | Common cause: PG DSN wrong, CH unreachable; check `kubectl logs` |
-| Metrics in `signal_aggregated_metrics` look 2× expected | Pre-Phase 4.2 deployment had a crash that double-wrote, or the ALTER for `non_replicated_deduplication_window` wasn't applied | Verify with `SHOW CREATE TABLE signal_derived_metrics` — settings clause must include `non_replicated_deduplication_window = 1000` |
+| Flat near 0–10s | Keeping up; happy path | None |
+| Stable at minutes | At capacity but tracking inflow | Acceptable if SLO allows; otherwise scale |
+| Growing without bound | Below inflow rate; falling behind forever | Scale (`scale-safety.ps1`) |
 
 ---
 
-## 11. Development
+## 9. Horizontal scaling
 
-### 11.1 Adding a metric
+**Performance and Cost** run as single-pod Deployments — they're CPU-cheap and rarely bottleneck. They stay at `replicas: 1` with `WORKER_PARTITION_COUNT=1`.
 
-If a compatible pattern and predicate already exist in `patterns.py` / `predicates.py`, a new metric is one line in a lens's `SPECS` list:
+**Safety** runs as a StatefulSet with 1–16 replicas. Each replica owns a fixed slice of the 16-slot virtual partition space.
 
-```python
-_spec("my_new_metric", llm_call, metadata_numeric("my_field"),
-      ["metadata.my_field"], unit="count", window="5m")
+### The slot model
+
+`signal_raw_spans` has a materialized column:
+
+```sql
+partition_id UInt8 MATERIALIZED cityHash64(trace_id) % 16
 ```
 
-Then run `python run_worker.py --worker <lens> --specs` to confirm it shows in the registry.
+Plus a set-typed skip index on `partition_id` so per-slot fetches are efficient. The column is computed once at ingestion and never recomputed — adding/removing pods doesn't re-hash anything.
 
-### 11.2 Adding a lens
+Each Safety pod owns a deterministic subset:
 
-1. Create `signal_worker/lenses/<lens>.py` with a `SpecWorker` subclass:
-   - Set `lens` (string), a `SPECS` list of `MetricSpec`, optionally `span_types`.
-   - Implement `build_context(span)` to parse everything the patterns need, once.
-2. Register it in `run_worker.py`'s `LENSES` dict.
-3. Add a `Dockerfile.<lens>` if it needs its own image:
-   ```dockerfile
-   FROM signal-worker:base
-   ENTRYPOINT ["python", "run_worker.py", "--worker", "<lens>"]
+| Pod count | Pod 0 owns | Pod 1 owns | … | Pod N-1 owns |
+|---|---|---|---|---|
+| 1 | {0..15} | — | — | — |
+| 2 | {0..7} | {8..15} | — | — |
+| 4 | {0..3} | {4..7} | {8..11} | {12..15} |
+| 8 | {0,1} | {2,3} | … | {14,15} |
+| 16 | {0} | {1} | … | {15} |
+
+Uneven divisions (e.g. `N=3`) work too — the first `(16 % N)` pods each get one extra slot. Power-of-2 divisions are recommended for even load.
+
+### Per-slot watermarks
+
+Each slot has its own row in `worker_checkpoints` keyed by `partition_key = "slot:N"`:
+
+```sql
+SELECT lens, partition_key, watermark, updated_by
+FROM worker_checkpoints
+WHERE lens = 'safety'
+ORDER BY partition_key;
+
+--   lens   | partition_key |        watermark        |       updated_by
+-- --------+---------------+-------------------------+-------------------------
+--  safety | slot:0        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
+--  safety | slot:1        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
+--  safety | slot:2        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
+--  safety | slot:3        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
+--  safety | slot:4        | 2026-06-18 11:58:00.000 | signal-worker-safety-1
+--  ...    | ...           | ...                     | ...
+```
+
+When pod count changes, **slot watermarks survive** — a new pod inheriting slot 7 reads slot 7's watermark and resumes from there. **No manual rebalancing. No human PG edits.** That's the whole point of the slot model.
+
+Single-pod deployments (default) use `partition_key = "default"` instead of slot rows — fully backward compatible.
+
+### Scaling Safety
+
+Use `infra/k8s/scale-safety.ps1` — it atomically patches `replicas` AND `WORKER_PARTITION_COUNT` in one operation, watches the rollout, and verifies expected slot watermarks materialize in PG.
+
+```powershell
+# Scale to 4 pods (each owns 4 slots)
+.\infra\k8s\scale-safety.ps1 -Replicas 4
+
+# Scale up to 8
+.\infra\k8s\scale-safety.ps1 -Replicas 8
+
+# Scale back down to 2 (no data loss; watermarks survive)
+.\infra\k8s\scale-safety.ps1 -Replicas 2
+```
+
+**Never edit `replicas` without also updating `WORKER_PARTITION_COUNT`** — they MUST match exactly. The script enforces this. Manual `kubectl scale` will desync them and produce wasted compute (data correctness is still preserved via dedup tokens, but pods will overlap).
+
+### Local two-pod simulation
+
+To exercise the partitioned path without K8s, use Docker directly:
+
+**Terminal A** (slots 0–7):
+```powershell
+docker run --rm `
+  -e WORKER_PARTITION_INDEX=0 `
+  -e WORKER_PARTITION_COUNT=2 `
+  --env-file signal-workers\.env.docker `
+  -p 8080:8080 `
+  signal-worker:safety
+```
+
+**Terminal B** (slots 8–15):
+```powershell
+docker run --rm `
+  -e WORKER_PARTITION_INDEX=1 `
+  -e WORKER_PARTITION_COUNT=2 `
+  --env-file signal-workers\.env.docker `
+  -p 8081:8080 `
+  signal-worker:safety
+```
+
+You'll see partition info in each pod's startup log:
+
+```
+[safety] partition: pod=0/2 owns_slots=[0, 1, 2, 3, 4, 5, 6, 7]
+[safety] starting poll loop (batch=5000 slots=[0, 1, 2, 3, 4, 5, 6, 7])
+```
+
+Metrics from each pod will be labeled with that pod's slots:
+
+```powershell
+curl.exe http://localhost:8080/metrics | findstr 'slot="0"'
+curl.exe http://localhost:8081/metrics | findstr 'slot="8"'
+```
+
+PG will have 16 slot rows once both pods have processed at least once per slot.
+
+---
+
+## 10. Production deployment (K8s)
+
+All manifests live under `infra/k8s/`. Numbered so `kubectl apply -f infra/k8s/` applies them in dependency order:
+
+```
+infra/k8s/
+├── 00_namespace.yaml              signal namespace
+├── 10_configmap.yaml              shared non-secret env (CH host, batch size, slot count, etc.)
+├── 11_secret.yaml                 PG_DSN, CH_PASSWORD (REPLACE PLACEHOLDERS BEFORE APPLYING)
+├── 20_deployment-performance.yaml Performance lens (replicas=1)
+├── 21_deployment-cost.yaml        Cost lens (replicas=1)
+├── 30_statefulset-safety.yaml     Safety lens (replicas=1..16, partitioned)
+├── 40_service-metrics.yaml        Headless services for Prometheus + StatefulSet DNS
+└── scale-safety.ps1               Automated rebalancing script
+```
+
+### Deploy
+
+```powershell
+# 1. Substitute placeholders in 11_secret.yaml (PG_DSN, CH_PASSWORD)
+notepad infra\k8s\11_secret.yaml
+
+# 2. Apply
+kubectl apply -f infra/k8s/
+
+# 3. Watch all three workers come up
+kubectl get pods -n signal -w
+```
+
+You should see:
+
+```
+NAME                                          READY   STATUS    RESTARTS   AGE
+signal-worker-performance-7d4c5f9b9-xz9kj     1/1     Running   0          30s
+signal-worker-cost-6f8b4d7d8-mn2vh            1/1     Running   0          30s
+signal-worker-safety-0                        1/1     Running   0          30s
+```
+
+(Note the StatefulSet ordinal `-0` on Safety vs the random hashes on Performance/Cost.)
+
+### Scale Safety
+
+```powershell
+cd infra/k8s
+.\scale-safety.ps1 -Replicas 4
+```
+
+The script:
+
+1. Atomically patches `spec.replicas` + `WORKER_PARTITION_COUNT` env in one JSON patch.
+2. Watches `kubectl rollout status` until rollout completes.
+3. Polls Postgres until all expected slot watermark rows materialize in `worker_checkpoints`.
+4. Reports success with the new pod list, or warns if any slots are missing (typically because spans haven't arrived for that slot yet).
+
+For HPA-driven autoscaling (later phase), use `signal_worker_checkpoint_lag_seconds` as the input metric.
+
+### Prometheus scraping
+
+All worker pods carry pod annotations for auto-discovery:
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+```
+
+For Prometheus Operator users, add a `ServiceMonitor` selecting on `app=signal-worker`.
+
+### Connection to PG/CH from K8s pods
+
+By default the manifests assume PG and CH are reachable at:
+
+```yaml
+CH_HOST: "clickhouse.signal.svc.cluster.local"
+PG_DSN:  "postgresql://signal:CHANGEME@postgres.signal.svc.cluster.local:5432/signal"
+```
+
+Adjust per environment:
+
+| Environment | CH/PG location | Host string |
+|---|---|---|
+| Same K8s cluster | In-cluster service | `<svc>.<ns>.svc.cluster.local` |
+| Docker Desktop K8s + host containers | Host Docker network | `host.docker.internal` |
+| Managed services (GCP / AWS) | External endpoint | Per cloud provider |
+
+Verify connectivity from a worker pod:
+
+```powershell
+kubectl exec -n signal signal-worker-safety-0 -- `
+  python -c "import urllib.request; print(urllib.request.urlopen('http://`$CH_HOST:`$CH_PORT/ping').read())"
+```
+
+---
+
+## 11. Data correctness
+
+The pipeline guarantees:
+
+- **Append-only writes.** Workers only `INSERT` into `signal_derived_metrics`; they never UPDATE or DELETE.
+- **Idempotency under restart.** Each insert carries a deterministic `insert_deduplication_token` of the form `{lens}:s{slot}:{newest_recorded_at}:{batch_size}`. ClickHouse's `non_replicated_deduplication_window = 1000` setting drops duplicate tokens silently — and critically, the materialized view does NOT fire on a dropped insert. So crash-and-replay produces no double-counts.
+- **Per-lens isolation.** Each lens has its own checkpoint row(s), its own image, its own Deployment/StatefulSet. A slow or broken Safety pod does not affect Performance or Cost.
+- **Slot watermarks survive scaling.** Per-slot rows in `worker_checkpoints` persist across pod count changes. Adding or removing replicas reassigns ownership but never loses progress.
+
+What's *not* guaranteed:
+
+- **Exactly-once across CH and PG.** No shared transaction. We settle for effective once-per-row in CH via dedup; PG watermark can technically lag.
+- **Strict inter-batch ordering.** Each batch is atomic, but `ORDER BY recorded_at LIMIT N` can skip rows that share the boundary timestamp if a tie spans the batch edge (mitigated by `WORKER_BATCH=5000`).
+- **Concurrent multi-pod on the same slot.** Don't override the scale script with `kubectl scale` — the script keeps `replicas` and `WORKER_PARTITION_COUNT` in sync. Manual scaling can desync them, causing wasted compute.
+
+See `ARCHITECTURE.md` § 9 for the full failure-mode table.
+
+---
+
+## 12. Failure modes
+
+### Pod restarts mid-batch
+
+`process_batch` is interrupted → no `write()` happens → checkpoint doesn't advance → restart re-fetches the same spans → dedup token matches the un-written attempt (or matches the prior successful write, depending on where the crash hit) → CH drops the duplicate insert if any → MV doesn't fire. **No data loss, no double-count.**
+
+### PG unavailable
+
+Checkpoint save/load fails → exception propagates → pod restarts → load retries on next boot. Worker is unavailable until PG recovers, but no data is lost (CH spans wait for the worker to come back).
+
+### CH unavailable
+
+Fetch fails → exception → restart. Same recovery semantics.
+
+### Safety models fail to load
+
+Pod fails readiness check → K8s doesn't route traffic to it → liveness check fails after threshold → pod restarts. If model files are corrupt (bad image), all replicas fail — roll back to previous image.
+
+### Slow batches blocking the run loop
+
+By design — the loop is synchronous. If Safety is consistently slow:
+
+1. Check `signal_worker_batch_duration_seconds` p95 vs the rate of incoming spans.
+2. Check `signal_worker_checkpoint_lag_seconds` — if growing, you're below capacity.
+3. Scale up via `scale-safety.ps1 -Replicas N` (up to 16).
+
+### Wasted compute during rolling update
+
+When you scale, the StatefulSet rolls pods one at a time. For ~30s during the rollout, slot ownership is briefly inconsistent (some pods see the new COUNT, others the old). Dedup tokens preserve data correctness; the only cost is wasted CPU on those slots. For minimal disruption, prefer `podManagementPolicy: Parallel` (already set in `30_statefulset-safety.yaml`).
+
+---
+
+## 13. Adding a new lens
+
+1. Create `signal_worker/lenses/<name>.py` subclassing `SpecWorker`:
+
+   ```python
+   class MyLensWorker(SpecWorker):
+       lens = "mylens"
+       SPECS = [...]                          # MetricSpec list
+       span_types = ("model_call",)           # optional CH-side prefilter
+ 
+       def build_context(self, span):
+           # Parse metadata, do math, return a dict
+           return {"my_value": ...}
    ```
-4. Add a row to `infra/postgres/init/02_thresholds.sql` if it needs its own toggle table.
-5. Validate offline with a CSV first, then run `--once` live.
 
-See **ARCHITECTURE.md → "Adding a lens"** for the full walkthrough.
+2. Register in `run_worker.py` `LENSES` dict:
 
-### 11.3 Running tests
+   ```python
+   LENSES = {
+       "performance": PerformanceWorker,
+       "cost":        CostWorker,
+       "safety":      SafetyWorker,
+       "mylens":      MyLensWorker,
+   }
+   ```
 
-```powershell
-cd signal-workers
-python validate_performance.py
-```
+3. If the lens needs its own image (heavy deps), create `Dockerfile.mylens` based on `:base`. Otherwise `:base` itself can run any lens via `--worker mylens`.
 
-That runs the Performance lens against an exported spans CSV and diffs against the expected derived rows.
+4. If the lens needs new threshold dimensions, add them to `infra/postgres/init/02_thresholds.sql` and seed.
 
-### 11.4 Local + container parity
+5. Validate offline against a CSV (`--csv`) before deploying.
 
-The `--csv` path in `run_worker.py` runs the exact same `compute()` logic without needing ClickHouse or Postgres. Use it to validate logic changes before they touch live infra.
+6. Add a Deployment or StatefulSet manifest under `infra/k8s/`. Performance-like → Deployment. Safety-like (slow ML, needs scaling) → StatefulSet + `scale-mylens.ps1`.
 
-```powershell
-python run_worker.py --worker performance --csv ../infra/data/signal_raw_spans.csv --out perf-out.csv
-```
+Reference implementations:
+
+- Simple stateless: `lenses/performance.py` — 14 specs, ~30 lines of `build_context`
+- With PG dependency: `lenses/cost.py` — pricing cache + 22 specs
+- Heavy ML + slot scaling: `lenses/safety.py` — PrefillStep + lazy models + StatefulSet
 
 ---
 
 ## Appendix — Related docs
 
-- **ARCHITECTURE.md** — engine design, scoping conventions, MV details, scaling tradeoffs.
-- **infra/README.md** — ClickHouse + Postgres compose stack, schema files, data loaders.
-- **toxicity/README.md** — toxicity, prompt-injection, moderation classifier package.
-- **PII/README.md** — Presidio-backed PII detection package.
-
-For team questions / PR discussion: tag the Signal observability owners in the repo.
+- **`ARCHITECTURE.md`** — design rationale, schemas, tradeoffs, failure-mode tables
+- **`infra/README.md`** — Postgres + ClickHouse compose stack, schemas
+- **`PII/README.md`** — the Presidio-backed PII detection package (Safety dependency)
+- **`toxicity/README.md`** — the FastText + DeBERTa toxicity classifier (Safety dependency)
+- **`infra/k8s/scale-safety.ps1`** — the scaling automation script

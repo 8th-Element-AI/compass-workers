@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quality-observability-runtime"
+version = "0.1.0"
+description = "Quality observability scoring runtime — NLI faithfulness/coherence, embedding completeness/chunk-utilization, cross-encoder context relevance."
+requires-python = ">=3.10"
+dependencies = [
+  "huggingface_hub>=0.30.0",
+  "numpy>=1.24",
+  "pyyaml>=6",
+  "sentence-transformers>=2.7",
+  "torch>=2.2",
+  "transformers>=4.52.0",
+]
+
+[project.scripts]
+quality-score = "quality_observability.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["quality_observability*"]

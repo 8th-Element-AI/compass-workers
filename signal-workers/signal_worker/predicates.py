@@ -71,3 +71,44 @@ def cost_kb(span):
 
 def solution_only(span):
     return span.get("span_type") == "solution"
+
+# ---- quality-lens predicates ----
+# All six are span-shape based (span_type only); no PG lookup needed, same
+# rule as every other predicate in this file.
+
+def retrieval_op(span):
+    """Spans that retrieve chunks from a knowledge base."""
+    return span.get("span_type") == "retrieval"
+
+
+def tool_op(span):
+    """Spans that invoke an external tool / function."""
+    return span.get("span_type") == "tool_call"
+
+
+def validated_op(span):
+    """Spans whose output passes through an explicit validator step."""
+    return span.get("span_type") == "validation"
+
+
+def data_op(span):
+    """Spans whose unit of work is a data record or batch of records."""
+    return span.get("span_type") in ("validation", "skill_exec")
+
+
+def output_bearing(span):
+    """Spans that produce a checkable output payload.
+
+    Excludes infrastructure spans (solution / workflow / agent containers).
+    Used by format_correctness — only outputs we can parse can be format-checked.
+    """
+    return span.get("span_type") in ("model_call", "tool_call", "validation")
+
+
+def schema_checked(span):
+    """Spans for which schema_conformance is meaningful.
+
+    `validation` spans carry an explicit pass/fail in metadata.valid; `model_call`
+    spans are checked only when the runtime declared an expected schema.
+    """
+    return span.get("span_type") in ("model_call", "validation")

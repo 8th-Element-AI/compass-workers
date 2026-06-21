@@ -15,5 +15,12 @@ docker build --secret id=hf_token,env=HF_TOKEN `
     -f signal-workers/Dockerfile.safety `
     -t signal-worker:safety .
 
+Write-Host "─── Building signal-worker:quality ───" -ForegroundColor Cyan
+# Default Quality models are public on HF; the secret mount is included so a
+# private-model swap doesn't require touching this script.
+docker build --secret id=hf_token,env=HF_TOKEN `
+    -f signal-workers/Dockerfile.quality `
+    -t signal-worker:quality .
+
 Write-Host "`n─── All images built ───" -ForegroundColor Green
 docker images "signal-worker*" --format "table {{.Repository}}:{{.Tag}}`t{{.Size}}`t{{.CreatedSince}}"

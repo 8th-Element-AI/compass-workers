@@ -34,6 +34,25 @@ data:
   SIGNAL_TOXICITY_ONNX_PROVIDER="auto"
   SIGNAL_TOXICITY_MAX_LENGTH="512"
   SIGNAL_TOXICITY_FP16="true"
-  SIGNAL_TOXICITY_BATCH_SIZE="32"
   SIGNAL_TOXICITY_PI_THRESHOLD="0.50"
   SIGNAL_TOXICITY_HARMFUL_THRESHOLD="0.50"
+
+  # ── Quality lens ──
+  # Model paths (NLI/EMBED/RELEVANCE) and MODELS_ROOT are NOT set here —
+  # they're baked into the image's ENV in Dockerfile.quality so the lens
+  # always finds the right tree inside /opt/models. Only operational knobs
+  # belong in the ConfigMap.
+  #
+  # SEMANTIC=0 turns off model loading entirely → only the 6 mechanical
+  # metrics emit (format_correctness, schema_conformance, tool_call_validity,
+  # data_completeness, data_accuracy, constraint_satisfaction). Use this if
+  # you want a fast, no-GPU "is structure right" signal.
+  SIGNAL_QUALITY_SEMANTIC:           "1"
+  SIGNAL_QUALITY_SAMPLE:             "1.0"     # 0.1 = score 10% of spans (stable per span_id)
+  SIGNAL_QUALITY_BATCH:              "32"      # sentence-transformers batch_size
+  SIGNAL_QUALITY_CACHE_MAX:          "20000"   # per-worker LRU cache of scoring results
+  SIGNAL_QUALITY_DEVICE:             "cpu"     # set "cuda" if running on GPU nodes
+  SIGNAL_QUALITY_PREMISE_MAX_CHARS:  "2000"
+  SIGNAL_QUALITY_MAX_SENTS:          "10"
+  SIGNAL_QUALITY_SENT_MIN_CHARS:     "3"
+  SIGNAL_QUALITY_CHUNK_USED_COS:     "0.5"

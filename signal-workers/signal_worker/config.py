@@ -140,3 +140,53 @@ class Config(BaseSettings):
     signal_toxicity_harmful_threshold: float = Field(
         default=0.83, alias="SIGNAL_TOXICITY_HARMFUL_THRESHOLD"
     )
+
+    # ── Quality — gate + sampling ────────────────────────────
+    signal_quality_semantic: bool = Field(
+        default=True, alias="SIGNAL_QUALITY_SEMANTIC"
+    )
+    signal_quality_sample: float = Field(
+        default=1.0, alias="SIGNAL_QUALITY_SAMPLE"
+    )
+    signal_quality_cache_max: int = Field(
+        default=20000, alias="SIGNAL_QUALITY_CACHE_MAX"
+    )
+
+    # ── Quality — runtime ────────────────────────────────────
+    signal_quality_device: str = Field(
+        default="cpu", alias="SIGNAL_QUALITY_DEVICE"
+    )
+    signal_quality_batch: int = Field(
+        default=32, alias="SIGNAL_QUALITY_BATCH"
+    )
+
+    # ── Quality — model paths ────────────────────────────────
+    # Same pattern as SIGNAL_TOXICITY_MODELS_ROOT + the per-model paths:
+    # paths can be absolute, or relative under the models root. The image
+    # bakes models at /opt/models/<name>; dev points at ./models/<name>.
+    signal_quality_models_root: str = Field(
+        default="./models", alias="SIGNAL_QUALITY_MODELS_ROOT"
+    )
+    signal_quality_nli_path: str = Field(
+        default="nli", alias="SIGNAL_QUALITY_NLI_PATH"
+    )
+    signal_quality_embed_path: str = Field(
+        default="embedding", alias="SIGNAL_QUALITY_EMBED_PATH"
+    )
+    signal_quality_relevance_path: str = Field(
+        default="relevance", alias="SIGNAL_QUALITY_RELEVANCE_PATH"
+    )
+
+    # ── Quality — recipe knobs (overridable; defaults match constants.py) ──
+    signal_quality_premise_max_chars: int = Field(
+        default=2000, alias="SIGNAL_QUALITY_PREMISE_MAX_CHARS"
+    )
+    signal_quality_max_sents: int = Field(
+        default=10, alias="SIGNAL_QUALITY_MAX_SENTS"
+    )
+    signal_quality_sent_min_chars: int = Field(
+        default=3, alias="SIGNAL_QUALITY_SENT_MIN_CHARS"
+    )
+    signal_quality_chunk_used_cos: float = Field(
+        default=0.5, alias="SIGNAL_QUALITY_CHUNK_USED_COS"
+    )

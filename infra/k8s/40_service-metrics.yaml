@@ -18,7 +18,30 @@ spec:
     port: 8080
     targetPort: 8080
 ---
-# Service used by Prometheus to discover all worker pods (all three lenses).
+# Headless service for the Quality StatefulSet's stable DNS.
+# Pods become resolvable as signal-worker-quality-0.signal-worker-quality.signal.svc.cluster.local
+# Selector matches the labels in 31_statefulset-quality.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: signal-worker-quality
+  namespace: signal
+  labels:
+    app: signal-worker
+    lens: quality
+spec:
+  clusterIP: None    # headless
+  selector:
+    app: signal-worker
+    lens: quality
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+---
+# Service used by Prometheus to discover all worker pods (all four lenses).
+# Selector is intentionally label-only so any new lens that carries
+# `app=signal-worker` gets picked up automatically.
 apiVersion: v1
 kind: Service
 metadata:

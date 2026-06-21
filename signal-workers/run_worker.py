@@ -27,6 +27,7 @@ from signal_worker.config import Config
 from signal_worker.lenses.cost import CostWorker
 from signal_worker.lenses.performance import PerformanceWorker
 from signal_worker.lenses.safety import SafetyWorker
+from signal_worker.lenses.quality import QualityWorker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +41,7 @@ LENSES = {
     "performance": PerformanceWorker,
     "cost":        CostWorker,
     "safety":      SafetyWorker,
+    "quality":     QualityWorker,
 }
 
 
