@@ -6,7 +6,7 @@ Two classes:
 
 Both expose `classify(text)` and `classify_batch(texts, batch_size=...)` returning
 results in the v1 shape: `{"scores": {<label>: <float>}, "raw": ..., "latency_ms": ...}`.
-Signal-workers' safety lens reads `res["scores"]["prompt_injection"]` and
+Compass-workers' safety lens reads `res["scores"]["prompt_injection"]` and
 `res["scores"]["harmful_content"]`, so this shape is load-bearing.
 
 Threading:
@@ -140,7 +140,7 @@ class PromptInjectionModel:
             "latency_ms": round((time.time() - started) * 1000, 3),
         }
 
-    # ---- batched (signal-workers entry point) ------------------------
+    # ---- batched (compass-workers entry point) ------------------------
     def classify_batch(
         self,
         texts: list[str],
@@ -256,7 +256,7 @@ class MiniLMToxicSpamONNXModel:
             "latency_ms": round((time.time() - started) * 1000, 3),
         }
 
-    # ---- batched (signal-workers entry point) ------------------------
+    # ---- batched (compass-workers entry point) ------------------------
     def classify_batch(
         self,
         texts: list[str],

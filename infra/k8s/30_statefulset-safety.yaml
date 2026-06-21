@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: signal-worker-safety
-  namespace: signal
+  name: compass-worker-safety
+  namespace: compass
   labels:
-    app: signal-worker
+    app: compass-worker
     lens: safety
 spec:
-  serviceName: signal-worker-safety   # must match the headless Service below
+  serviceName: compass-worker-safety   # must match the headless Service below
   replicas: 1                         # start at 1; use scale-safety.ps1 to change
   podManagementPolicy: Parallel       # all pods start in parallel, no sequential wait
   selector:
     matchLabels:
-      app: signal-worker
+      app: compass-worker
       lens: safety
   updateStrategy:
     type: RollingUpdate
@@ -21,7 +21,7 @@ spec:
   template:
     metadata:
       labels:
-        app: signal-worker
+        app: compass-worker
         lens: safety
       annotations:
         prometheus.io/scrape: "true"
@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 120   # bigger — safety batches take longer to drain
       containers:
       - name: worker
-        image: signal-worker:safety
+        image: compass-worker:safety
         imagePullPolicy: IfNotPresent
         env:
         # POD_NAME → derived WORKER_PARTITION_INDEX at startup (see run_worker.py)
@@ -43,8 +43,8 @@ spec:
         - name: WORKER_PARTITION_COUNT
           value: "1"
         envFrom:
-        - configMapRef: { name: signal-worker-config }
-        - secretRef:    { name: signal-worker-secrets }
+        - configMapRef: { name: compass-worker-config }
+        - secretRef:    { name: compass-worker-secrets }
         ports:
         - name: metrics
           containerPort: 8080

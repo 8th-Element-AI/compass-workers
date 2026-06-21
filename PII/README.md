@@ -1,7 +1,7 @@
 # PII Detection & Severity Evaluation
 
 Presidio-backed PII / PHI detection with quasi-identifier risk scoring, for
-the Signal platform. Used by the Safety lens worker for the `pii_count` and
+the Compass platform. Used by the Safety lens worker for the `pii_count` and
 `pii_detected` metrics; also usable standalone as a CLI, library, or REST API.
 
 ```
@@ -44,7 +44,7 @@ happen during text processing.
 8. [Batch processing](#8-batch-processing)
 9. [Models — what to pick and why](#9-models--what-to-pick-and-why)
 10. [Performance & benchmarks](#10-performance--benchmarks)
-11. [Use inside Signal Workers](#11-use-inside-signal-workers)
+11. [Use inside Compass Workers](#11-use-inside-compass-workers)
 12. [Troubleshooting](#12-troubleshooting)
 
 ---
@@ -355,7 +355,7 @@ schedule would otherwise fire them.
 
 `analyze()` runs detection, then severity evaluation, then filters: only
 entities contributing to a violation of severity `>= MEDIUM` are counted in
-`entity_count` / `entities` / `has_pii`. The raw detection signal is
+`entity_count` / `entities` / `has_pii`. The raw detection compass is
 preserved in `raw_entity_count` / `raw_entities` for debugging.
 
 Worked examples:
@@ -466,14 +466,14 @@ result reused for every duplicate position.
 |---|---|---|---|---|
 | Compliance scans on structured docs (cards, IDs, emails) | `None` | <15 ms | low for free-text PII | Regex-only is enough; the patterns catch all structured PII formats |
 | General observability, no name catch needed | `en_core_web_sm` | ~50 ms | medium | spaCy small. Cheap. |
-| Production observability with name/location catch | `gravitee-io/bert-small-pii-detection` | ~330 ms | high | What the Signal Safety worker uses |
+| Production observability with name/location catch | `gravitee-io/bert-small-pii-detection` | ~330 ms | high | What the Compass Safety worker uses |
 | Medical (clinical notes) | `obi/deid_roberta_i2b2` | ~600 ms | very high (medical) | Specifically trained on i2b2 |
 | Highest recall, any domain | `iiiorg/piiranha-v1-detect-personal-information` | ~500 ms | very high | Largest of the recommended models |
 
 See `eval/BENCHMARK_RESULTS.md` for F1 scores on a 500-doc evaluation set
 across all 13 benchmarked models.
 
-### Why we default to `gravitee-io/bert-small-pii-detection` in Signal
+### Why we default to `gravitee-io/bert-small-pii-detection` in Compass
 
 It hits the best F1 for the cost: ~85% F1 at 330 ms/doc on CPU. The
 `gravitee-io` variant is small enough to be pre-cached in the Safety Docker
@@ -507,7 +507,7 @@ Linear-ish up to physical core count, then plateaus.
 | 8 | 18 |
 | 16 | 21 |
 
-The Safety worker uses `batch_size=4` by default (`SIGNAL_PII_BATCH_SIZE=4`).
+The Safety worker uses `batch_size=4` by default (`COMPASS_PII_BATCH_SIZE=4`).
 
 ### Running the benchmark yourself
 
@@ -524,16 +524,16 @@ python eval/benchmark_models.py --max-docs 500
 
 ---
 
-## 11. Use inside Signal Workers
+## 11. Use inside Compass Workers
 
 The Safety lens worker imports this package as `deidentifier`:
 
 ```python
 from deidentifier import PresidioEngine
 
-engine = PresidioEngine.get_instance(ner_model=os.environ["SIGNAL_PII_NER_MODEL"])
+engine = PresidioEngine.get_instance(ner_model=os.environ["COMPASS_PII_NER_MODEL"])
 results = engine.analyze_batch(unique_texts,
-                               batch_size=int(os.environ["SIGNAL_PII_BATCH_SIZE"]))
+                               batch_size=int(os.environ["COMPASS_PII_BATCH_SIZE"]))
 ```
 
 Each `AnalysisResult` carries:
@@ -546,13 +546,13 @@ The worker emits:
 - `pii_detected` ← `pii_count > 0` (real risk, not raw component matches)
 - `pii_types` ← keys of `result.entities`
 
-Relevant Signal env vars:
+Relevant Compass env vars:
 
 | Env var | Default | What it does |
 |---|---|---|
-| `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | Picks the NER model |
-| `SIGNAL_PII_BATCH_SIZE` | `4` | ThreadPool width for `analyze_batch` |
-| `SIGNAL_PII_CACHE_MAX` | `20000` | Per-worker LRU on content hashes |
+| `COMPASS_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | Picks the NER model |
+| `COMPASS_PII_BATCH_SIZE` | `4` | ThreadPool width for `analyze_batch` |
+| `COMPASS_PII_CACHE_MAX` | `20000` | Per-worker LRU on content hashes |
 
 The Safety Docker image pre-caches the default model during build:
 
@@ -585,6 +585,6 @@ So no runtime download is ever needed.
 ## Appendix — Related
 
 - **toxicity/README.md** — sibling package for prompt injection / moderation classification.
-- **signal-workers/README.md → Lenses → Safety** — how Signal uses both packages.
+- **compass-workers/README.md → Lenses → Safety** — how Compass uses both packages.
 - Presidio docs: <https://microsoft.github.io/presidio/>
 - Sweeney, L. (2000). *Simple Demographics Often Identify People Uniquely.* — origin of the {DOB, ZIP, gender} canonical triad.

@@ -1,4 +1,4 @@
--- Signal Observability — Threshold Seed (v5 schema)
+-- Compass Observability — Threshold Seed (v5 schema)
 -- Metric set: option B (P0 + error_rate, retry_count, time_to_first_token, sla_met, goal_achieved)
 -- Auto-generated. id/is_active/created_at/updated_at use table defaults.
 -- FK-validity (scope_fk_validity CHECK) verified for every row before emit.

@@ -1,11 +1,11 @@
-# Signal Workers
+# Compass Workers
 
 Per-lens observability workers that read raw spans from ClickHouse, compute derived metrics, and write them back. One lens = one image = one Deployment (or StatefulSet for Safety). Each lens is independently deployable, scalable, and observable.
 
 ```
 ┌──────────────────────┐    poll       ┌─────────────────────────┐
 │  ClickHouse          │ ─────────►    │  Lens Worker            │
-│  signal_raw_spans    │               │  (perf / cost / safety) │
+│  compass_raw_spans    │               │  (perf / cost / safety) │
 └──────────────────────┘               │                         │
         ▲                              │  - Stage 1 gate         │
         │ INSERT                       │  - Per-span context     │
@@ -13,7 +13,7 @@ Per-lens observability workers that read raw spans from ClickHouse, compute deri
         │  dedup tokens)               │  - Emit derived rows    │
         │                              └─────────────────────────┘
 ┌──────────────────────┐                         │
-│  signal_derived_     │ ◄───────────────────────┘
+│  compass_derived_     │ ◄───────────────────────┘
 │  metrics             │
 │  → mv_agg_base fires │     ┌──────────────────────────────────┐
 │  → aggregated table  │     │  Postgres                        │
@@ -27,9 +27,9 @@ The three lenses available today:
 
 | Lens | Image | Replicas | Notes |
 |---|---|---|---|
-| **Performance** | `signal-worker:performance` | Deployment, 1 | Latency, errors, retries |
-| **Cost** | `signal-worker:cost` | Deployment, 1 | Token spend, waste, pricing from PG |
-| **Safety** | `signal-worker:safety` | StatefulSet, 1–16 | PII + toxicity (ML); horizontally scalable |
+| **Performance** | `compass-worker:performance` | Deployment, 1 | Latency, errors, retries |
+| **Cost** | `compass-worker:cost` | Deployment, 1 | Token spend, waste, pricing from PG |
+| **Safety** | `compass-worker:safety` | StatefulSet, 1–16 | PII + toxicity (ML); horizontally scalable |
 
 ---
 
@@ -59,12 +59,12 @@ Each worker runs a synchronous poll loop:
 load checkpoint → fetch batch from CH → process → write derived rows → save checkpoint → repeat
 ```
 
-- **`fetch`**: `SELECT ... FROM signal_raw_spans WHERE recorded_at > $watermark [AND partition_id = $slot] LIMIT $batch_size`
+- **`fetch`**: `SELECT ... FROM compass_raw_spans WHERE recorded_at > $watermark [AND partition_id = $slot] LIMIT $batch_size`
 - **`process`**: Stage 1 gate (drop spans no threshold cares about) → per-span `build_context` → walk `MetricSpec` list → emit rows
 - **`write`**: bulk INSERT with a deterministic `insert_deduplication_token`, so any replay drops silently
 - **`checkpoint`**: UPSERT into Postgres `worker_checkpoints` keyed by `(lens, partition_key)`
 
-Three lenses share the same engine (`signal_worker.base`, `signal_worker.spec`); they differ only by the `MetricSpec` list, their `build_context` function, and (for Safety) the analyzers they wire into the `PrefillStep` pipeline.
+Three lenses share the same engine (`compass_worker.base`, `compass_worker.spec`); they differ only by the `MetricSpec` list, their `build_context` function, and (for Safety) the analyzers they wire into the `PrefillStep` pipeline.
 
 For architecture, design tradeoffs, and rationale, see **`ARCHITECTURE.md`**.
 
@@ -73,7 +73,7 @@ For architecture, design tradeoffs, and rationale, see **`ARCHITECTURE.md`**.
 ## 2. Prerequisites
 
 - Python 3.11+
-- ClickHouse reachable (default `localhost:8123`) with the Signal schema applied; see `infra/`
+- ClickHouse reachable (default `localhost:8123`) with the Compass schema applied; see `infra/`
 - Postgres reachable (default `localhost:5432`) with the v5 schema seeded and the `worker_checkpoints` table created
 - Docker / Docker Compose for local infra
 - Kubernetes cluster + `kubectl` for production deployment (StatefulSet, ConfigMap, Secret, Service)
@@ -86,7 +86,7 @@ For architecture, design tradeoffs, and rationale, see **`ARCHITECTURE.md`**.
 For local dev (host-side):
 
 ```powershell
-cd E:\8thelement\Signal
+cd E:\8thelement\Compass
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -100,7 +100,7 @@ For container/production builds, see [§7 Docker images](#7-docker-images).
 
 ## 4. Configuration
 
-All settings are environment-driven via `signal_worker.config.Config` (a pydantic-settings `BaseSettings`). Defaults are sensible for local dev. Override via env vars or a `.env` file.
+All settings are environment-driven via `compass_worker.config.Config` (a pydantic-settings `BaseSettings`). Defaults are sensible for local dev. Override via env vars or a `.env` file.
 
 ### Datastore connections
 
@@ -108,10 +108,10 @@ All settings are environment-driven via `signal_worker.config.Config` (a pydanti
 |---|---|---|---|
 | `CH_HOST` | `localhost` | all | ClickHouse host |
 | `CH_PORT` | `8123` | all | ClickHouse HTTP port |
-| `CH_DB` | `signal` | all | ClickHouse database |
+| `CH_DB` | `compass` | all | ClickHouse database |
 | `CH_USER` | `default` | all | ClickHouse user |
 | `CH_PASSWORD` | `""` | all | ClickHouse password |
-| `PG_DSN` | `postgresql://postgres@localhost:5432/signal` | cost + safety | Postgres DSN (pricing, thresholds, checkpoints) |
+| `PG_DSN` | `postgresql://postgres@localhost:5432/compass` | cost + safety | Postgres DSN (pricing, thresholds, checkpoints) |
 
 ### Run loop
 
@@ -119,8 +119,8 @@ All settings are environment-driven via `signal_worker.config.Config` (a pydanti
 |---|---|---|
 | `WORKER_BATCH` | `5000` | Spans fetched per batch (per slot) |
 | `WORKER_POLL_SEC` | `2.0` | Idle backoff between empty fetches |
-| `SIGNAL_TOGGLE_TTL` | `300` | Toggle cache refresh interval (seconds) |
-| `SIGNAL_PRICING_TTL` | `300` | Pricing cache refresh interval (seconds; Cost lens only) |
+| `COMPASS_TOGGLE_TTL` | `300` | Toggle cache refresh interval (seconds) |
+| `COMPASS_PRICING_TTL` | `300` | Pricing cache refresh interval (seconds; Cost lens only) |
 
 ### Horizontal scaling (Phase 4.3)
 
@@ -128,7 +128,7 @@ All settings are environment-driven via `signal_worker.config.Config` (a pydanti
 |---|---|---|
 | `WORKER_PARTITION_INDEX` | `0` | This pod's index (0-based). Auto-derived from `POD_NAME` in K8s |
 | `WORKER_PARTITION_COUNT` | `1` | Total pods sharing the slot space. Must match StatefulSet `replicas` |
-| `WORKER_PARTITION_TOTAL_SLOTS` | `16` | Size of the fixed slot space (matches `cityHash64 % N` on `signal_raw_spans.partition_id`) |
+| `WORKER_PARTITION_TOTAL_SLOTS` | `16` | Size of the fixed slot space (matches `cityHash64 % N` on `compass_raw_spans.partition_id`) |
 
 Defaults (`COUNT=1`, `INDEX=0`) preserve single-pod behavior — Performance and Cost stay at the defaults; only Safety scales.
 
@@ -142,37 +142,37 @@ Defaults (`COUNT=1`, `INDEX=0`) preserve single-pod behavior — Performance and
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `SIGNAL_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | HF model id for PII NER |
-| `SIGNAL_PII_BATCH` | `4` | ThreadPool width for Presidio analyze_batch |
-| `SIGNAL_PII_CACHE_MAX` | `20000` | LRU cap on per-worker PII content cache |
-| `SIGNAL_TOXICITY_MODELS_ROOT` | `/opt/models` | Base path for the 4 toxicity model artifacts |
-| `SIGNAL_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
-| `SIGNAL_TOXICITY_BATCH_SIZE` | `32` | Worker-side batched inference width |
-| `SIGNAL_TOXICITY_FAST_ALLOW` | `0.02` | FastText threshold below which BERT is skipped |
-| `SIGNAL_TOXICITY_PI_REVIEW` | `0.50` | Prompt-injection review threshold |
-| `SIGNAL_TOXICITY_HARMFUL_REVIEW` | `0.50` | Harmful-content review threshold |
+| `COMPASS_PII_NER_MODEL` | `gravitee-io/bert-small-pii-detection` | HF model id for PII NER |
+| `COMPASS_PII_BATCH` | `4` | ThreadPool width for Presidio analyze_batch |
+| `COMPASS_PII_CACHE_MAX` | `20000` | LRU cap on per-worker PII content cache |
+| `COMPASS_TOXICITY_MODELS_ROOT` | `/opt/models` | Base path for the 4 toxicity model artifacts |
+| `COMPASS_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
+| `COMPASS_TOXICITY_BATCH_SIZE` | `32` | Worker-side batched inference width |
+| `COMPASS_TOXICITY_FAST_ALLOW` | `0.02` | FastText threshold below which BERT is skipped |
+| `COMPASS_TOXICITY_PI_REVIEW` | `0.50` | Prompt-injection review threshold |
+| `COMPASS_TOXICITY_HARMFUL_REVIEW` | `0.50` | Harmful-content review threshold |
 
-Full list in `signal_worker/config.py`.
+Full list in `compass_worker/config.py`.
 
 ### `.env` files
 
 Local dev:
 
 ```bash
-# signal-workers/.env
+# compass-workers/.env
 CH_HOST=localhost
 CH_PORT=8123
-PG_DSN=postgresql://signal:signal@localhost:5432/signal
+PG_DSN=postgresql://compass:compass@localhost:5432/compass
 WORKER_BATCH=5000
 ```
 
 Docker run:
 
 ```bash
-# signal-workers/.env.docker
+# compass-workers/.env.docker
 CH_HOST=host.docker.internal
 CH_PORT=8123
-PG_DSN=postgresql://signal:signal@host.docker.internal:5432/signal
+PG_DSN=postgresql://compass:compass@host.docker.internal:5432/compass
 WORKER_BATCH=5000
 ```
 
@@ -216,40 +216,40 @@ This is how every new lens is regression-tested before being deployed.
 
 ## 7. Docker images
 
-Four images, all built from `signal-workers/` Dockerfiles with build context at the repo root.
+Four images, all built from `compass-workers/` Dockerfiles with build context at the repo root.
 
 | Image | Dockerfile | Size | Purpose |
 |---|---|---|---|
-| `signal-worker:base` | `Dockerfile` | ~400 MB | Internal framework image. Not deployed directly |
-| `signal-worker:performance` | `Dockerfile.performance` | ~400 MB | Performance lens entrypoint over `:base` |
-| `signal-worker:cost` | `Dockerfile.cost` | ~400 MB | Cost lens entrypoint over `:base` |
-| `signal-worker:safety` | `Dockerfile.safety` | ~5.5 GB | Safety lens — extends `:base` with PyTorch, transformers, Presidio, spaCy, the 4 toxicity model artifacts (~1.5 GB), and the PII NER model (~220 MB) |
+| `compass-worker:base` | `Dockerfile` | ~400 MB | Internal framework image. Not deployed directly |
+| `compass-worker:performance` | `Dockerfile.performance` | ~400 MB | Performance lens entrypoint over `:base` |
+| `compass-worker:cost` | `Dockerfile.cost` | ~400 MB | Cost lens entrypoint over `:base` |
+| `compass-worker:safety` | `Dockerfile.safety` | ~5.5 GB | Safety lens — extends `:base` with PyTorch, transformers, Presidio, spaCy, the 4 toxicity model artifacts (~1.5 GB), and the PII NER model (~220 MB) |
 
 Build order matters — `:base` first, then the child images that `FROM` it.
 
 ```powershell
-cd E:\8thelement\Signal
+cd E:\8thelement\Compass
 $env:DOCKER_BUILDKIT = "1"
 
 # 1. Base (framework + deps)
-docker build -f signal-workers/Dockerfile -t signal-worker:base .
+docker build -f compass-workers/Dockerfile -t compass-worker:base .
 
 # 2. Performance and Cost (just set the entrypoint)
-docker build -f signal-workers/Dockerfile.performance -t signal-worker:performance .
-docker build -f signal-workers/Dockerfile.cost        -t signal-worker:cost .
+docker build -f compass-workers/Dockerfile.performance -t compass-worker:performance .
+docker build -f compass-workers/Dockerfile.cost        -t compass-worker:cost .
 
 # 3. Safety (heavy ML stack + model downloads — pass HF_TOKEN as BuildKit secret)
 $env:HF_TOKEN = "hf_..."
-docker build --secret id=hf_token,env=HF_TOKEN -f signal-workers/Dockerfile.safety -t signal-worker:safety .
+docker build --secret id=hf_token,env=HF_TOKEN -f compass-workers/Dockerfile.safety -t compass-worker:safety .
 ```
 
 Run any of them with `--env-file`:
 
 ```powershell
 docker run --rm `
-  --env-file signal-workers\.env.docker `
+  --env-file compass-workers\.env.docker `
   -p 8080:8080 `
-  signal-worker:safety
+  compass-worker:safety
 ```
 
 The `-p 8080:8080` exposes the observability endpoints (next section).
@@ -273,7 +273,7 @@ Quick checks (from the host, while a worker is running):
 ```powershell
 curl.exe http://localhost:8080/healthz
 curl.exe http://localhost:8080/readyz
-curl.exe http://localhost:8080/metrics | findstr signal_worker
+curl.exe http://localhost:8080/metrics | findstr compass_worker
 ```
 
 > PowerShell aliases bare `curl` to `Invoke-WebRequest`, which is flaky on chunked responses. Use `curl.exe` (Windows 10+ ships it).
@@ -284,39 +284,39 @@ All counters / gauges / histograms are labeled by `(lens, slot)`. For unpartitio
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `signal_worker_batches_total` | counter | `lens, slot, result` | `result` ∈ `success` / `error` / `empty` |
-| `signal_worker_spans_processed_total` | counter | `lens, slot` | Spans fetched from CH |
-| `signal_worker_rows_emitted_total` | counter | `lens, slot` | Derived rows written |
-| `signal_worker_skipped_at_gate_total` | counter | `lens, slot` | Spans dropped at Stage 1 |
-| `signal_worker_batch_duration_seconds` | histogram | `lens, slot` | `process_batch()` wall-clock |
-| `signal_worker_write_duration_seconds` | histogram | `lens, slot` | CH insert wall-clock |
-| `signal_worker_checkpoint_lag_seconds` | gauge | `lens, slot` | `now − last_processed_span.recorded_at` |
+| `compass_worker_batches_total` | counter | `lens, slot, result` | `result` ∈ `success` / `error` / `empty` |
+| `compass_worker_spans_processed_total` | counter | `lens, slot` | Spans fetched from CH |
+| `compass_worker_rows_emitted_total` | counter | `lens, slot` | Derived rows written |
+| `compass_worker_skipped_at_gate_total` | counter | `lens, slot` | Spans dropped at Stage 1 |
+| `compass_worker_batch_duration_seconds` | histogram | `lens, slot` | `process_batch()` wall-clock |
+| `compass_worker_write_duration_seconds` | histogram | `lens, slot` | CH insert wall-clock |
+| `compass_worker_checkpoint_lag_seconds` | gauge | `lens, slot` | `now − last_processed_span.recorded_at` |
 
 ### Common queries
 
 ```promql
 # Are workers healthy?
-rate(signal_worker_batches_total{result="success"}[5m]) by (lens)
+rate(compass_worker_batches_total{result="success"}[5m]) by (lens)
 
 # Are we keeping up?
-signal_worker_checkpoint_lag_seconds
+compass_worker_checkpoint_lag_seconds
 
 # Throughput per slot — useful for spotting hot slots
-rate(signal_worker_spans_processed_total[5m]) by (lens, slot)
+rate(compass_worker_spans_processed_total[5m]) by (lens, slot)
 
 # Error rate
-rate(signal_worker_batches_total{result="error"}[5m]) by (lens) /
-rate(signal_worker_batches_total[5m]) by (lens)
+rate(compass_worker_batches_total{result="error"}[5m]) by (lens) /
+rate(compass_worker_batches_total[5m]) by (lens)
 
 # Per-lens p95 batch latency
 histogram_quantile(0.95,
-  rate(signal_worker_batch_duration_seconds_bucket[5m])
+  rate(compass_worker_batch_duration_seconds_bucket[5m])
 ) by (lens)
 ```
 
-### Scaling signal
+### Scaling compass
 
-`signal_worker_checkpoint_lag_seconds{lens="safety"}` is the input for an HPA on the Safety StatefulSet (when you're ready to automate scaling). Three regimes:
+`compass_worker_checkpoint_lag_seconds{lens="safety"}` is the input for an HPA on the Safety StatefulSet (when you're ready to automate scaling). Three regimes:
 
 | Lag pattern | What it means | Action |
 |---|---|---|
@@ -334,7 +334,7 @@ histogram_quantile(0.95,
 
 ### The slot model
 
-`signal_raw_spans` has a materialized column:
+`compass_raw_spans` has a materialized column:
 
 ```sql
 partition_id UInt8 MATERIALIZED cityHash64(trace_id) % 16
@@ -366,11 +366,11 @@ ORDER BY partition_key;
 
 --   lens   | partition_key |        watermark        |       updated_by
 -- --------+---------------+-------------------------+-------------------------
---  safety | slot:0        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
---  safety | slot:1        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
---  safety | slot:2        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
---  safety | slot:3        | 2026-06-18 12:00:00.000 | signal-worker-safety-0
---  safety | slot:4        | 2026-06-18 11:58:00.000 | signal-worker-safety-1
+--  safety | slot:0        | 2026-06-18 12:00:00.000 | compass-worker-safety-0
+--  safety | slot:1        | 2026-06-18 12:00:00.000 | compass-worker-safety-0
+--  safety | slot:2        | 2026-06-18 12:00:00.000 | compass-worker-safety-0
+--  safety | slot:3        | 2026-06-18 12:00:00.000 | compass-worker-safety-0
+--  safety | slot:4        | 2026-06-18 11:58:00.000 | compass-worker-safety-1
 --  ...    | ...           | ...                     | ...
 ```
 
@@ -404,9 +404,9 @@ To exercise the partitioned path without K8s, use Docker directly:
 docker run --rm `
   -e WORKER_PARTITION_INDEX=0 `
   -e WORKER_PARTITION_COUNT=2 `
-  --env-file signal-workers\.env.docker `
+  --env-file compass-workers\.env.docker `
   -p 8080:8080 `
-  signal-worker:safety
+  compass-worker:safety
 ```
 
 **Terminal B** (slots 8–15):
@@ -414,9 +414,9 @@ docker run --rm `
 docker run --rm `
   -e WORKER_PARTITION_INDEX=1 `
   -e WORKER_PARTITION_COUNT=2 `
-  --env-file signal-workers\.env.docker `
+  --env-file compass-workers\.env.docker `
   -p 8081:8080 `
-  signal-worker:safety
+  compass-worker:safety
 ```
 
 You'll see partition info in each pod's startup log:
@@ -443,7 +443,7 @@ All manifests live under `infra/k8s/`. Numbered so `kubectl apply -f infra/k8s/`
 
 ```
 infra/k8s/
-├── 00_namespace.yaml              signal namespace
+├── 00_namespace.yaml              compass namespace
 ├── 10_configmap.yaml              shared non-secret env (CH host, batch size, slot count, etc.)
 ├── 11_secret.yaml                 PG_DSN, CH_PASSWORD (REPLACE PLACEHOLDERS BEFORE APPLYING)
 ├── 20_deployment-performance.yaml Performance lens (replicas=1)
@@ -463,16 +463,16 @@ notepad infra\k8s\11_secret.yaml
 kubectl apply -f infra/k8s/
 
 # 3. Watch all three workers come up
-kubectl get pods -n signal -w
+kubectl get pods -n compass -w
 ```
 
 You should see:
 
 ```
 NAME                                          READY   STATUS    RESTARTS   AGE
-signal-worker-performance-7d4c5f9b9-xz9kj     1/1     Running   0          30s
-signal-worker-cost-6f8b4d7d8-mn2vh            1/1     Running   0          30s
-signal-worker-safety-0                        1/1     Running   0          30s
+compass-worker-performance-7d4c5f9b9-xz9kj     1/1     Running   0          30s
+compass-worker-cost-6f8b4d7d8-mn2vh            1/1     Running   0          30s
+compass-worker-safety-0                        1/1     Running   0          30s
 ```
 
 (Note the StatefulSet ordinal `-0` on Safety vs the random hashes on Performance/Cost.)
@@ -491,7 +491,7 @@ The script:
 3. Polls Postgres until all expected slot watermark rows materialize in `worker_checkpoints`.
 4. Reports success with the new pod list, or warns if any slots are missing (typically because spans haven't arrived for that slot yet).
 
-For HPA-driven autoscaling (later phase), use `signal_worker_checkpoint_lag_seconds` as the input metric.
+For HPA-driven autoscaling (later phase), use `compass_worker_checkpoint_lag_seconds` as the input metric.
 
 ### Prometheus scraping
 
@@ -504,15 +504,15 @@ annotations:
   prometheus.io/path: "/metrics"
 ```
 
-For Prometheus Operator users, add a `ServiceMonitor` selecting on `app=signal-worker`.
+For Prometheus Operator users, add a `ServiceMonitor` selecting on `app=compass-worker`.
 
 ### Connection to PG/CH from K8s pods
 
 By default the manifests assume PG and CH are reachable at:
 
 ```yaml
-CH_HOST: "clickhouse.signal.svc.cluster.local"
-PG_DSN:  "postgresql://signal:CHANGEME@postgres.signal.svc.cluster.local:5432/signal"
+CH_HOST: "clickhouse.compass.svc.cluster.local"
+PG_DSN:  "postgresql://compass:CHANGEME@postgres.compass.svc.cluster.local:5432/compass"
 ```
 
 Adjust per environment:
@@ -526,7 +526,7 @@ Adjust per environment:
 Verify connectivity from a worker pod:
 
 ```powershell
-kubectl exec -n signal signal-worker-safety-0 -- `
+kubectl exec -n compass compass-worker-safety-0 -- `
   python -c "import urllib.request; print(urllib.request.urlopen('http://`$CH_HOST:`$CH_PORT/ping').read())"
 ```
 
@@ -536,7 +536,7 @@ kubectl exec -n signal signal-worker-safety-0 -- `
 
 The pipeline guarantees:
 
-- **Append-only writes.** Workers only `INSERT` into `signal_derived_metrics`; they never UPDATE or DELETE.
+- **Append-only writes.** Workers only `INSERT` into `compass_derived_metrics`; they never UPDATE or DELETE.
 - **Idempotency under restart.** Each insert carries a deterministic `insert_deduplication_token` of the form `{lens}:s{slot}:{newest_recorded_at}:{batch_size}`. ClickHouse's `non_replicated_deduplication_window = 1000` setting drops duplicate tokens silently — and critically, the materialized view does NOT fire on a dropped insert. So crash-and-replay produces no double-counts.
 - **Per-lens isolation.** Each lens has its own checkpoint row(s), its own image, its own Deployment/StatefulSet. A slow or broken Safety pod does not affect Performance or Cost.
 - **Slot watermarks survive scaling.** Per-slot rows in `worker_checkpoints` persist across pod count changes. Adding or removing replicas reassigns ownership but never loses progress.
@@ -573,8 +573,8 @@ Pod fails readiness check → K8s doesn't route traffic to it → liveness check
 
 By design — the loop is synchronous. If Safety is consistently slow:
 
-1. Check `signal_worker_batch_duration_seconds` p95 vs the rate of incoming spans.
-2. Check `signal_worker_checkpoint_lag_seconds` — if growing, you're below capacity.
+1. Check `compass_worker_batch_duration_seconds` p95 vs the rate of incoming spans.
+2. Check `compass_worker_checkpoint_lag_seconds` — if growing, you're below capacity.
 3. Scale up via `scale-safety.ps1 -Replicas N` (up to 16).
 
 ### Wasted compute during rolling update
@@ -585,7 +585,7 @@ When you scale, the StatefulSet rolls pods one at a time. For ~30s during the ro
 
 ## 13. Adding a new lens
 
-1. Create `signal_worker/lenses/<name>.py` subclassing `SpecWorker`:
+1. Create `compass_worker/lenses/<name>.py` subclassing `SpecWorker`:
 
    ```python
    class MyLensWorker(SpecWorker):

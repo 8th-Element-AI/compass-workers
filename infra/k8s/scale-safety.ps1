@@ -13,14 +13,14 @@
 
     Quality semantic scoring is CPU-heavy (NLI + embedding + relevance models),
     so partitioned scaling matters more here than for Performance/Cost. For
-    mechanical-only mode (SIGNAL_QUALITY_SEMANTIC=0), replicas=1 is enough.
+    mechanical-only mode (COMPASS_QUALITY_SEMANTIC=0), replicas=1 is enough.
 
 .PARAMETER Replicas
     Target replica count. Must be 1 ≤ N ≤ 16 (the partition_id space).
     Power-of-2 values (1, 2, 4, 8, 16) give even slot distribution.
 
 .PARAMETER Namespace
-    K8s namespace. Default: signal.
+    K8s namespace. Default: compass.
 
 .EXAMPLE
     .\scale-quality.ps1 -Replicas 2
@@ -35,8 +35,8 @@ param(
     [ValidateRange(1, 16)]
     [int]$Replicas,
 
-    [string]$Namespace = "signal",
-    [string]$StatefulSet = "signal-worker-quality",
+    [string]$Namespace = "compass",
+    [string]$StatefulSet = "compass-worker-quality",
     [int]$TotalSlots = 16,
     [int]$VerifyTimeoutSec = 180   # bigger than safety — quality batches are slower to checkpoint
 )
@@ -62,7 +62,7 @@ function Get-ExpectedSlotKeys {
     for ($i = 0; $i -lt $PodCount; $i++) {
         $size = if ($i -lt $extra) { $base + 1 } else { $base }
         for ($j = 0; $j -lt $size; $j++) {
-            # Pod i's slot indices match what signal_worker.partition.compute_slots produces
+            # Pod i's slot indices match what compass_worker.partition.compute_slots produces
             if ($i -lt $extra) {
                 $slot = $i * ($base + 1) + $j
             } else {
@@ -101,7 +101,7 @@ kubectl rollout status statefulset $StatefulSet -n $Namespace --timeout=10m
 
 # ───────── 5. Verify all pods are Ready ─────────
 Write-Host "`nVerifying $Replicas pods are Ready..." -ForegroundColor Cyan
-$pods = kubectl get pods -n $Namespace -l "app=signal-worker,lens=quality" `
+$pods = kubectl get pods -n $Namespace -l "app=compass-worker,lens=quality" `
     -o jsonpath="{.items[*].metadata.name}" --no-headers
 $podArr = $pods -split " "
 Write-Host "  Pods: $($podArr -join ', ')"
@@ -117,13 +117,13 @@ $deadline = (Get-Date).AddSeconds($VerifyTimeoutSec)
 $pgPodName = kubectl get pods -n $Namespace -l "app=postgres" `
     -o jsonpath="{.items[0].metadata.name}" 2>$null
 if (-not $pgPodName) {
-    $pgPodName = "signal-postgres-0"
+    $pgPodName = "compass-postgres-0"
 }
 
 $missing = $expectedKeys
 while ((Get-Date) -lt $deadline -and $missing.Count -gt 0) {
     $actual = kubectl exec -n $Namespace $pgPodName -- `
-        psql -U signal -d signal -t -A `
+        psql -U compass -d compass -t -A `
         -c "SELECT partition_key FROM worker_checkpoints WHERE lens='quality' ORDER BY partition_key" 2>$null
 
     if ($actual) {
@@ -139,7 +139,7 @@ while ((Get-Date) -lt $deadline -and $missing.Count -gt 0) {
 if ($missing.Count -eq 0) {
     Write-Host "`n✅ Scaled to $Replicas pods. All $($expectedKeys.Count) slot checkpoints present in PG." `
         -ForegroundColor Green
-    kubectl get pods -n $Namespace -l "app=signal-worker,lens=quality"
+    kubectl get pods -n $Namespace -l "app=compass-worker,lens=quality"
     exit 0
 } else {
     Write-Warning "`nSome expected slots missing after ${VerifyTimeoutSec}s. Missing: $($missing -join ', ')"

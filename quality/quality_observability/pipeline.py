@@ -41,7 +41,7 @@ class LocalScorer(QualityScorer):
 
     Args:
         config_path: Path to a runtime.yaml. None -> default location.
-        config_dict: Pre-built config dict (signal-workers builds this from
+        config_dict: Pre-built config dict (compass-workers builds this from
             its Settings). Takes precedence over config_path when both are
             given.
         device: Override the YAML `runtime.device`.

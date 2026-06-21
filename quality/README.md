@@ -3,7 +3,7 @@
 Standalone scoring package for **quality observability**. Returns per-metric
 scores for `faithfulness`, `coherence`, `completeness`, `context_relevance`,
 and `chunk_utilization` over LLM input/output text and retrieved chunks.
-Used by the Signal Quality lens for the corresponding metrics; also usable
+Used by the Compass Quality lens for the corresponding metrics; also usable
 standalone via CLI or Python API.
 
 > **This is not an evaluation harness.** It returns numeric quality scores
@@ -111,7 +111,7 @@ print(res["faithfulness"], res["coherence"], res["completeness"])
 print(res["context_relevance"], res["chunk_utilization"])
 ```
 
-### Config dict (used by signal-workers)
+### Config dict (used by compass-workers)
 
 ```python
 clf = LocalScorer(config_dict={
@@ -232,7 +232,7 @@ runtime:
 | `premise_max_chars` | Cap on input fed to NLI as premise | Lower → faster, may drop recall on long contexts |
 | `max_sents` | Cap on sentences kept per side | Lower → fewer NLI pairs per span |
 | `sent_min_chars` | Min sentence length kept after split | Higher → drop more fragments |
-| `chunk_used_cos` | Cosine threshold for "answer used this chunk" | Calibrated against `SIGNAL_QUALITY_SAMPLE` traces |
+| `chunk_used_cos` | Cosine threshold for "answer used this chunk" | Calibrated against `COMPASS_QUALITY_SAMPLE` traces |
 
 | Runtime knob | Meaning |
 |---|---|
@@ -241,13 +241,13 @@ runtime:
 
 ---
 
-## Use inside Signal Workers
+## Use inside Compass Workers
 
 The Quality lens imports this as `quality_observability`:
 
 ```python
 from quality_observability import LocalScorer
-scorer = LocalScorer(config_dict={...})  # built from signal-worker Settings
+scorer = LocalScorer(config_dict={...})  # built from compass-worker Settings
 ```
 
 The worker calls the **batched** API directly so a whole batch of spans

@@ -1,7 +1,7 @@
 """Default recipe constants.
 
 These are the defaults baked into the package. The `recipes:` block in
-`configs/runtime.yaml` (or `config_dict["recipes"]` passed by signal-workers)
+`configs/runtime.yaml` (or `config_dict["recipes"]` passed by compass-workers)
 overrides them per-instance — change the YAML, not the code.
 """
 from __future__ import annotations

@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: signal-worker-cost
-  namespace: signal
+  name: compass-worker-cost
+  namespace: compass
   labels:
-    app: signal-worker
+    app: compass-worker
     lens: cost
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: signal-worker
+      app: compass-worker
       lens: cost
   strategy:
     type: RollingUpdate
@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       labels:
-        app: signal-worker
+        app: compass-worker
         lens: cost
       annotations:
         prometheus.io/scrape: "true"
@@ -30,11 +30,11 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: worker
-        image: signal-worker:cost
+        image: compass-worker:cost
         imagePullPolicy: IfNotPresent
         envFrom:
-        - configMapRef: { name: signal-worker-config }
-        - secretRef:    { name: signal-worker-secrets }
+        - configMapRef: { name: compass-worker-config }
+        - secretRef:    { name: compass-worker-secrets }
         ports:
         - name: metrics
           containerPort: 8080

@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: signal-worker-performance
-  namespace: signal
+  name: compass-worker-performance
+  namespace: compass
   labels:
-    app: signal-worker
+    app: compass-worker
     lens: performance
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: signal-worker
+      app: compass-worker
       lens: performance
   strategy:
     type: RollingUpdate
@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       labels:
-        app: signal-worker
+        app: compass-worker
         lens: performance
       annotations:
         prometheus.io/scrape: "true"
@@ -30,11 +30,11 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: worker
-        image: signal-worker:performance
+        image: compass-worker:performance
         imagePullPolicy: IfNotPresent
         envFrom:
-        - configMapRef: { name: signal-worker-config }
-        - secretRef:    { name: signal-worker-secrets }
+        - configMapRef: { name: compass-worker-config }
+        - secretRef:    { name: compass-worker-secrets }
         ports:
         - name: metrics
           containerPort: 8080

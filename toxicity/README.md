@@ -2,7 +2,7 @@
 
 Standalone classifier package for **safety observability**. Returns labels and
 scores for `prompt_injection` and `harmful_content` over LLM input/output text.
-Used by the Signal Safety lens for the `prompt_injection_detected` and
+Used by the Compass Safety lens for the `prompt_injection_detected` and
 `toxicity_detected` metrics; also usable standalone via CLI or Python API.
 
 > **This is not a guardrail package.** It returns scores so your application
@@ -103,7 +103,7 @@ print(result["triggered_models"])   # ['prompt_injection', 'moderation']
 print(result["latency_ms"])         # 32.4
 ```
 
-### Config dict (used by signal-workers)
+### Config dict (used by compass-workers)
 
 ```python
 clf = ToxicityClassifier(config_dict={
@@ -235,13 +235,13 @@ runtime:
 
 ---
 
-## Use inside Signal Workers
+## Use inside Compass Workers
 
 The Safety lens worker imports this as `toxicity_observability`:
 
 ```python
 from toxicity_observability import ToxicityClassifier
-clf = ToxicityClassifier(config_dict={...})  # built from signal-worker Settings
+clf = ToxicityClassifier(config_dict={...})  # built from compass-worker Settings
 ```
 
 The worker calls the **batched** model APIs directly to sidestep PyTorch
@@ -259,17 +259,17 @@ mod_results[0]["scores"]["harmful_content"]   # float
 Lazy access still applies — a worker with only `prompt_injection_detected`
 toggles active never instantiates the moderation model (and vice versa).
 
-Relevant env vars used by `signal-workers/.env`:
+Relevant env vars used by `compass-workers/.env`:
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `SIGNAL_TOXICITY_MODELS_ROOT` | `/opt/models` (in image) | Base path for the two artifacts |
-| `SIGNAL_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
-| `SIGNAL_TOXICITY_ONNX_PROVIDER` | `auto` | `auto` / `cpu` / `cuda` |
-| `SIGNAL_TOXICITY_BATCH_SIZE` | `32` | Per-batch texts for worker-side batched inference |
-| `SIGNAL_TOXICITY_MAX_LENGTH` | `512` | Tokenizer truncation |
-| `SIGNAL_TOXICITY_PI_REVIEW` | `0.50` | Threshold for emitting `prompt_injection` |
-| `SIGNAL_TOXICITY_HARMFUL_REVIEW` | `0.83` | Threshold for emitting `harmful_content` |
+| `COMPASS_TOXICITY_MODELS_ROOT` | `/opt/models` (in image) | Base path for the two artifacts |
+| `COMPASS_TOXICITY_DEVICE` | `cpu` | `cpu` or `cuda` |
+| `COMPASS_TOXICITY_ONNX_PROVIDER` | `auto` | `auto` / `cpu` / `cuda` |
+| `COMPASS_TOXICITY_BATCH_SIZE` | `32` | Per-batch texts for worker-side batched inference |
+| `COMPASS_TOXICITY_MAX_LENGTH` | `512` | Tokenizer truncation |
+| `COMPASS_TOXICITY_PI_REVIEW` | `0.50` | Threshold for emitting `prompt_injection` |
+| `COMPASS_TOXICITY_HARMFUL_REVIEW` | `0.83` | Threshold for emitting `harmful_content` |
 
 ---
 
@@ -283,7 +283,7 @@ Approximate per-text latencies (single call, both models always run):
 | CUDA + CUDA ORT, fp16 | ~15–25 ms |
 
 For high-throughput workloads, use `classify_batch` on the underlying model
-objects (as the Signal worker does) — one tokenize + one model call per chunk
+objects (as the Compass worker does) — one tokenize + one model call per chunk
 of `batch_size`.
 
 ---
@@ -298,11 +298,11 @@ of `batch_size`.
 | `sexual` label dropped | Folded into `harmful_content`; no consumer ever read it |
 | `JailbreakModel` removed | Dead code (referenced a non-existent constant) |
 | `full_scan` flag removed | No rules inside `classify()` to bypass |
-| `normalize.py` and `deterministic.py` removed | v2's behavior is to pass raw text to the BERTs; keeping a rules layer would change the validated behavior. signal-workers' safety lens dropped its rules step in the matching migration |
+| `normalize.py` and `deterministic.py` removed | v2's behavior is to pass raw text to the BERTs; keeping a rules layer would change the validated behavior. compass-workers' safety lens dropped its rules step in the matching migration |
 | New `onnx_provider` config | Needed for the new ONNX moderation backend |
 | `harmful_content_review` default 0.50 → 0.83 | MiniLM is more aggressive; higher threshold matches v2 calibration |
 
-The public API surface that `signal-workers` depends on is unchanged:
+The public API surface that `compass-workers` depends on is unchanged:
 `ToxicityClassifier(config_dict=...)`, lazy `.prompt_injection` / `.moderation`
 properties, and `.classify_batch(texts, batch_size=...)` on each returning
 `{"scores": {<label>: <float>}, ...}`.

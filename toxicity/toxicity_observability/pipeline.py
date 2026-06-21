@@ -37,7 +37,7 @@ class ToxicityClassifier:
         """Initialize from a YAML file or a pre-built dict.
 
         Precedence:
-          * `config_dict` if provided (signal-workers builds it from env-driven
+          * `config_dict` if provided (compass-workers builds it from env-driven
             pydantic Settings),
           * else `load_config(config_path)` (yaml file, default for CLI).
 

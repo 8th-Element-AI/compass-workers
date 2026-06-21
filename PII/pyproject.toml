@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# HuggingFace NER mode (what Signal Safety uses).
+# HuggingFace NER mode (what Compass Safety uses).
 # Required when ner_model is a HF model ID like
 # "gravitee-io/bert-small-pii-detection".
 #

@@ -1,5 +1,5 @@
 -- ============================================================================
--- Signal Observability — PostgreSQL schema (v5)
+-- Compass Observability — PostgreSQL schema (v5)
 -- 5 registry tables (solutions, endpoints, workflows, agents, components)
 -- + 2 use tables (bindings, thresholds).
 -- Applied automatically on first container boot (docker-entrypoint-initdb.d),

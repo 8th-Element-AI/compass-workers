@@ -32,7 +32,7 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     Returns:
         Parsed YAML as nested dict. No defaulting / validation happens here —
         the LocalScorer applies its own per-section defaults so a partial
-        config (e.g. config_dict from signal-workers that omits `recipes:`)
+        config (e.g. config_dict from compass-workers that omits `recipes:`)
         still works.
     """
     cfg_path = Path(config_path) if config_path else repo_root() / "configs" / "runtime.yaml"

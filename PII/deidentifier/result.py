@@ -18,7 +18,7 @@ class AnalysisResult:
     in PolicyEvaluator determine which detections matter.
 
     For debugging or downstream tooling that needs the raw detection
-    signal, `raw_entity_count` and `raw_entities` carry the unfiltered
+    compass, `raw_entity_count` and `raw_entities` carry the unfiltered
     counts.
 
     Backwards compatibility: existing callers reading
