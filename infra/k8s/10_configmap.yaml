@@ -15,6 +15,35 @@ data:
   WORKER_POLL_SEC: "5.0"
   COMPASS_TOGGLE_TTL: "300"
 
+  # ── Per-lens batch + poll overrides ──
+  # Pattern:
+  #   WORKER_BATCH_<LENS>      — fetches per slot per iteration for that lens
+  #   WORKER_POLL_SEC_<LENS>   — idle sleep AFTER a partial/empty batch
+  #
+  # Drain-when-busy semantics (see BaseWorker.run_poll):
+  #   full batch  -> immediate re-poll, no sleep (drain mode)
+  #   partial     -> process, then sleep <poll_sec> before re-polling
+  #   empty       -> sleep <poll_sec> before re-polling
+  #
+  # Tuned per the lens's CPU cost per span:
+  #   Performance / Cost — cheap; big batches drain fast under load, poll
+  #                        fast when idle so dashboards stay fresh.
+  #   Safety            — moderate (Presidio PII + 2 toxicity models);
+  #                        medium batch keeps wall-time per batch bounded.
+  #   Quality           — expensive on CPU (NLI + embedding); small batch
+  #                        keeps per-batch wall-time bounded, long idle
+  #                        poll because semantic scoring at low traffic
+  #                        doesn't need second-by-second freshness.
+  WORKER_BATCH_PERFORMANCE: "5000"
+  WORKER_BATCH_COST:        "5000"
+  WORKER_BATCH_SAFETY:      "1000"
+  WORKER_BATCH_QUALITY:     "600"
+ 
+  WORKER_POLL_SEC_PERFORMANCE: "2.0"
+  WORKER_POLL_SEC_COST:        "2.0"
+  WORKER_POLL_SEC_SAFETY:      "5.0"
+  WORKER_POLL_SEC_QUALITY:     "120.0"
+
   # ── Horizontal scaling ──
   # WORKER_PARTITION_COUNT is set per-Deployment/StatefulSet, NOT here,
   # because it differs by lens (Performance=1, Cost=1, Safety=N).

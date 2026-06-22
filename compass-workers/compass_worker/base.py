@@ -267,16 +267,27 @@ class BaseWorker:
     # ---- poll loop (production-ish) ----
     def run_poll(self, once: bool = False):
         """Production poll loop: per-slot fetch → process → write → checkpoint.
-
+ 
+        Drain-when-busy, sleep-when-caught-up:
+            * If any slot returned a FULL batch (len == batch_size), loop
+              immediately to drain the backlog with no sleep.
+            * If every slot returned a partial batch or nothing, sleep for
+              poll_sec before the next round.
+ 
+        Per-lens batch_size / poll_sec come from cfg.batch_for(lens) /
+        cfg.poll_sec_for(lens) — falls back to the global WORKER_BATCH /
+        WORKER_POLL_SEC when no per-lens override is set.
+ 
         For unpartitioned lenses (single pod, no partition filter), my_slots
-        is [None] and this collapses to the previous single-iteration loop.
-
+        is [None] and the per-slot loop collapses to one iteration with no
+        partition filter.
+ 
         For partitioned lenses, each iteration walks every slot the pod owns,
         processing what's available in each. Slot checkpoints are independent,
         so a slow slot doesn't block fast ones, and pod-count changes are
         absorbed automatically — a new pod inheriting slot 7 reads slot 7's
         checkpoint and resumes from there.
-
+ 
         Args:
             once: If True, process at most one non-empty batch and return.
         """
@@ -291,25 +302,30 @@ class BaseWorker:
             set_ready,
         )
 
+        batch_size = self.cfg.batch_for(self.lens)
+        poll_sec   = self.cfg.poll_sec_for(self.lens)
+ 
         log.info(
-            "[%s] starting poll loop (batch=%d slots=%s)",
-            self.lens, self.cfg.batch_size,
+            "[%s] starting poll loop (batch=%d poll_sec=%.1fs slots=%s)",
+            self.lens, batch_size, poll_sec,
             "all" if not self.partitioned else self.my_slots,
         )
-        print(f"[{self.lens}] starting poll loop (batch={self.cfg.batch_size} "
-              f"slots={'all' if not self.partitioned else self.my_slots})")
+        print(f"[{self.lens}] starting poll loop "
+              f"(batch={batch_size} poll_sec={poll_sec}s "
+              f"Slots={'all' if not self.partitioned else self.my_slots})")
         set_ready(True)
-
+ 
         while not self._stop_event.is_set():
-            any_processed = False
-
+            any_processed   = False    # used by --once exit
+            full_batch_seen = False    # used by sleep gate
+ 
             for slot in self.my_slots:
                 if self._stop_event.is_set():
                     break
-
+ 
                 slot_label = "all" if slot is None else str(slot)
                 pk = self._partition_key_for(slot)
-
+ 
                 # Per-slot checkpoint + lag gauge
                 wm = self._checkpoint_store().load(self.lens, partition_key=pk)
                 try:
@@ -320,45 +336,51 @@ class BaseWorker:
                     )
                 except Exception:
                     pass
-
-                spans = self.fetch_batch(wm, self.cfg.batch_size, slot=slot)
+ 
+                spans = self.fetch_batch(wm, batch_size, slot=slot)
                 print(f"[{self.lens}:s{slot_label}] fetched {len(spans)} "
                       f"spans newer than {wm}")
-
+ 
                 if not spans:
                     BATCHES_TOTAL.labels(
                         lens=self.lens, slot=slot_label, result="empty"
                     ).inc()
                     continue
-
+ 
                 any_processed = True
+                # Track whether we're still draining a backlog. A full batch
+                # means CH had at least batch_size spans waiting — likely
+                # more behind it, so we shouldn't sleep before re-checking.
+                if len(spans) >= batch_size:
+                    full_batch_seen = True
+ 
                 SPANS_PROCESSED.labels(lens=self.lens, slot=slot_label).inc(len(spans))
-
+ 
                 try:
                     self._current_slot = slot_label
                     with BATCH_DURATION.labels(lens=self.lens, slot=slot_label).time():
                         rows = self.process_batch(spans)
-
+ 
                     newest = wm
                     for s in spans:
                         rec = str(s["recorded_at"])
                         if rec > newest:
                             newest = rec
-
+ 
                     # Slot in the token so two pods owning different slots
                     # produce distinct tokens — no collisions in the dedup window.
                     dedup_token = f"{self.lens}:s{slot_label}:{newest}:{len(spans)}"
-
+ 
                     with WRITE_DURATION.labels(lens=self.lens, slot=slot_label).time():
                         self.write(rows, dedup_token=dedup_token)
-
+ 
                     self._checkpoint_store().save(self.lens, newest, partition_key=pk)
-
+ 
                     ROWS_EMITTED.labels(lens=self.lens, slot=slot_label).inc(len(rows))
                     BATCHES_TOTAL.labels(
                         lens=self.lens, slot=slot_label, result="success"
                     ).inc()
-
+ 
                     log.info(
                         "[%s:s%s] %d spans -> %d metrics (wm=%s token=%s)",
                         self.lens, slot_label, len(spans), len(rows), newest, dedup_token,
@@ -370,11 +392,14 @@ class BaseWorker:
                     log.exception("[%s:s%s] batch failed; pod will restart",
                                   self.lens, slot_label)
                     raise
-
+ 
             if once and any_processed:
                 break
-
-            if not any_processed:
-                self._stop_event.wait(self.cfg.poll_sec)
-
+ 
+            # Sleep unless we're still draining a backlog. The threshold is
+            # "any slot returned a full batch" — a single slot with backlog
+            # is enough to keep the whole pod in drain mode.
+            if not full_batch_seen:
+                self._stop_event.wait(poll_sec)
+ 
         log.info("[%s] poll loop exited", self.lens)

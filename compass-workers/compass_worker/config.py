@@ -48,6 +48,16 @@ class Config(BaseSettings):
       alias="WORKER_POLL_SEC"
     )
 
+    batch_size_performance: int | None = Field(default=None, alias="WORKER_BATCH_PERFORMANCE")
+    batch_size_cost:        int | None = Field(default=None, alias="WORKER_BATCH_COST")
+    batch_size_safety:      int | None = Field(default=None, alias="WORKER_BATCH_SAFETY")
+    batch_size_quality:     int | None = Field(default=None, alias="WORKER_BATCH_QUALITY")
+ 
+    poll_sec_performance: float | None = Field(default=None, alias="WORKER_POLL_SEC_PERFORMANCE")
+    poll_sec_cost:        float | None = Field(default=None, alias="WORKER_POLL_SEC_COST")
+    poll_sec_safety:      float | None = Field(default=None, alias="WORKER_POLL_SEC_SAFETY")
+    poll_sec_quality:     float | None = Field(default=None, alias="WORKER_POLL_SEC_QUALITY")
+
     # ─── Horizontal scaling (Phase 4.3) ──────────────────────────────
     worker_partition_index: int = Field(
         default=0,
@@ -190,3 +200,23 @@ class Config(BaseSettings):
     compass_quality_chunk_used_cos: float = Field(
         default=0.5, alias="COMPASS_QUALITY_CHUNK_USED_COS"
     )
+
+
+    def batch_for(self, lens: str) -> int:
+        """Per-lens batch_size with fallback to the global WORKER_BATCH.
+ 
+        Used by BaseWorker.run_poll. Reading via getattr-with-default means
+        adding a new lens doesn't require touching this method — just add a
+        `batch_size_<lens>` field above.
+        """
+        v = getattr(self, f"batch_size_{lens}", None)
+        return v if v is not None else self.batch_size
+ 
+    def poll_sec_for(self, lens: str) -> float:
+        """Per-lens poll_sec with fallback to the global WORKER_POLL_SEC.
+ 
+        Same fallback shape as batch_for. Returns the IDLE sleep duration,
+        not a fetch interval — drain mode (full batch) bypasses this entirely.
+        """
+        v = getattr(self, f"poll_sec_{lens}", None)
+        return v if v is not None else self.poll_sec
