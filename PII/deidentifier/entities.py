@@ -25,9 +25,4 @@ class EntityType(str, Enum):
     NRP = "NRP"
     MEDICARE_ID = "MEDICARE_ID"
     ORG = "ORG"
-
-
-class Strategy(str, Enum):
-    REDACT = "redact"      # Replace with [ENTITY_TYPE]
-    MASK = "mask"          # Replace with *** (same length)
-    REPLACE = "replace"    # Replace with synthetic data via Faker
+    GENDER = "GENDER"

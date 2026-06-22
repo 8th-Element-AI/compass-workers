@@ -1,29 +1,29 @@
-name: signal
+name: compass
 
 services:
-  # postgres:
-  #   image: postgres:16
-  #   container_name: signal-postgres
-  #   environment:
-  #     POSTGRES_DB: ${PG_DB:-signal}
-  #     POSTGRES_USER: ${PG_USER:-postgres}
-  #     POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
-  #   ports:
-  #     - "${PG_PORT:-5432}:5432"
-  #   volumes:
-  #     - pg_data:/var/lib/postgresql/data
-  #     - ./postgres/init:/docker-entrypoint-initdb.d:ro
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DB:-signal}"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 10
+  postgres:
+    image: postgres:16
+    container_name: compass-postgres
+    environment:
+      POSTGRES_DB: ${PG_DB:-compass}
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DB:-compass}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: signal-clickhouse
+    image: clickhouse/clickhouse-server:26.3.2
+    container_name: compass-clickhouse
     environment:
-      CLICKHOUSE_DB: ${CH_DB:-signal}
+      CLICKHOUSE_DB: ${CH_DB:-compass}
       CLICKHOUSE_USER: ${CH_USER:-default}
       CLICKHOUSE_PASSWORD: ${CH_PASSWORD:-clickhouse}
     ports:
@@ -39,18 +39,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
-  # ---------------------------------------------------------------------------
-  # Future: streaming path for the workers (they currently POLL ClickHouse).
-  # Uncomment when you move workers from poll mode to NATS consumers.
-  # ---------------------------------------------------------------------------
-  # nats:
-  #   image: nats:2.10
-  #   container_name: signal-nats
-  #   command: ["-js"]                 # enable JetStream
-  #   ports:
-  #     - "4222:4222"
-  #     - "8222:8222"
 
 volumes:
   pg_data:

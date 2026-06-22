@@ -1,5 +1,5 @@
 """
-FastAPI service for de-identification.
+FastAPI service for PII detection.
 
 Loads PresidioEngine once at startup, then handles every request with no
 cold-start delay.
@@ -24,7 +24,7 @@ import os
 import time
 import logging
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel
@@ -53,8 +53,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="De-identification API",
-    description="PHI/PII de-identification backed by Presidio + optional HuggingFace NER",
+    title="PII Detection API",
+    description="PHI/PII detection backed by Presidio + optional HuggingFace NER",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -64,26 +64,17 @@ app = FastAPI(
 # Schemas
 # ---------------------------------------------------------------------------
 
-class DeidentifyRequest(BaseModel):
+class AnalyzeRequest(BaseModel):
     text: str
     document_id: Optional[str] = None
 
 
-class AuditEntry(BaseModel):
-    entity_type: str
-    strategy: str
-    start: int
-    end: int
-    score: float
-
-
-class DeidentifyResponse(BaseModel):
-    document_id: str
-    deidentified_text: str
-    entities_found: int
-    entities_processed: int
+class AnalyzeResponse(BaseModel):
+    document_id: Optional[str] = None
+    has_pii: bool
+    entity_count: int
+    entities: Dict[str, int]
     processing_time_ms: float
-    audit_entries: List[AuditEntry]
 
 
 class BatchRequest(BaseModel):
@@ -92,8 +83,25 @@ class BatchRequest(BaseModel):
 
 
 class BatchResponse(BaseModel):
-    results: List[DeidentifyResponse]
+    results: List[AnalyzeResponse]
     total_processing_time_ms: float
+
+
+class ViolationModel(BaseModel):
+    kind: str
+    severity: str
+    rule_name: str
+    entity_types: List[str]
+    span: Tuple[int, int]
+    score: float
+
+
+class EvaluateResponse(BaseModel):
+    document_id: Optional[str] = None
+    has_violation: bool
+    max_severity: str
+    violations: List[ViolationModel]
+    processing_time_ms: float
 
 
 # ---------------------------------------------------------------------------
@@ -109,37 +117,27 @@ def health():
     }
 
 
-def _build_response(result, elapsed_ms: float) -> DeidentifyResponse:
-    return DeidentifyResponse(
-        document_id=result.document_id,
-        deidentified_text=result.deidentified_text,
-        entities_found=result.audit_record.entities_found,
-        entities_processed=result.audit_record.entities_processed,
+def _build_response(result, elapsed_ms: float, document_id: Optional[str] = None) -> AnalyzeResponse:
+    return AnalyzeResponse(
+        document_id=document_id,
+        has_pii=result.has_pii,
+        entity_count=result.entity_count,
+        entities=result.entities,
         processing_time_ms=round(elapsed_ms, 2),
-        audit_entries=[
-            AuditEntry(
-                entity_type=e.entity_type,
-                strategy=e.strategy,
-                start=e.start,
-                end=e.end,
-                score=e.score,
-            )
-            for e in result.audit_record.entries
-        ],
     )
 
 
-@app.post("/deidentify", response_model=DeidentifyResponse)
-def deidentify(req: DeidentifyRequest):
+@app.post("/analyze", response_model=AnalyzeResponse)
+def analyze(req: AnalyzeRequest):
     if _engine is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
     t0 = time.perf_counter()
-    result = _engine.process(req.text, document_id=req.document_id)
-    return _build_response(result, (time.perf_counter() - t0) * 1000)
+    result = _engine.analyze(req.text)
+    return _build_response(result, (time.perf_counter() - t0) * 1000, req.document_id)
 
 
-@app.post("/deidentify/batch", response_model=BatchResponse)
-def deidentify_batch(req: BatchRequest):
+@app.post("/analyze/batch", response_model=BatchResponse)
+def analyze_batch(req: BatchRequest):
     if _engine is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
     if not req.texts:
@@ -153,26 +151,59 @@ def deidentify_batch(req: BatchRequest):
         )
 
     t0 = time.perf_counter()
-    responses = []
-    for text, doc_id in zip(req.texts, doc_ids):
-        t_doc = time.perf_counter()
-        result = _engine.process(text, document_id=doc_id)
-        responses.append(_build_response(result, (time.perf_counter() - t_doc) * 1000))
+    results = _engine.analyze_batch(req.texts)
+    elapsed_total = (time.perf_counter() - t0) * 1000
+    per_doc_ms = elapsed_total / len(req.texts)
+    responses = [
+        _build_response(result, per_doc_ms, doc_id)
+        for result, doc_id in zip(results, doc_ids)
+    ]
 
     return BatchResponse(
         results=responses,
-        total_processing_time_ms=round((time.perf_counter() - t0) * 1000, 2),
+        total_processing_time_ms=round(elapsed_total, 2),
     )
 
 
 @app.post(
-    "/deidentify/plain",
-    response_model=DeidentifyResponse,
-    summary="Deidentify plain text (paste multiline text directly)",
+    "/analyze/plain",
+    response_model=AnalyzeResponse,
+    summary="Analyze plain text (paste multiline text directly)",
 )
-def deidentify_plain(text: str = Body(..., media_type="text/plain")):
+def analyze_plain(text: str = Body(..., media_type="text/plain")):
     if _engine is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
     t0 = time.perf_counter()
-    result = _engine.process(text)
+    result = _engine.analyze(text)
     return _build_response(result, (time.perf_counter() - t0) * 1000)
+
+
+def _build_evaluate_response(result, elapsed_ms: float, document_id: Optional[str] = None) -> EvaluateResponse:
+    return EvaluateResponse(
+        document_id=document_id,
+        has_violation=result.has_violation,
+        max_severity=result.max_severity.value,
+        violations=[
+            ViolationModel(
+                kind=v.kind.value,
+                severity=v.severity.value,
+                rule_name=v.rule_name,
+                entity_types=[e.entity_type for e in v.entities],
+                span=v.span,
+                score=round(v.score, 4),
+            )
+            for v in result.violations
+        ],
+        processing_time_ms=round(elapsed_ms, 2),
+    )
+
+
+@app.post("/evaluate", response_model=EvaluateResponse)
+def evaluate(req: AnalyzeRequest):
+    """Detect, then score entity combinations for re-identification risk.
+    Detection-only — does not anonymize."""
+    if _engine is None:
+        raise HTTPException(status_code=503, detail="Engine not ready")
+    t0 = time.perf_counter()
+    result = _engine.evaluate(req.text)
+    return _build_evaluate_response(result, (time.perf_counter() - t0) * 1000, req.document_id)

@@ -1,5 +1,5 @@
 # ============================================================================
-# Signal Workers — .gitignore
+# Compass Workers — .gitignore
 # ============================================================================
 
 # ---- Python ----
@@ -18,13 +18,13 @@ venv/
 env/
 ENV/
 
-# ---- Worker runtime state (per-lens watermarks — machine-local, not source) ----
+# ---- Worker runtime state (per-lens checkpoints — machine-local, not source) ----
 state/
-*.watermark
-var/lib/signal-workers/
+*.checkpoint
+var/lib/compass-workers/
 
 # ---- Generated / large telemetry data (regenerated; never commit) ----
-signal_derived_metrics.csv
+compass_derived_metrics.csv
 *_derived.csv
 perf_derived*.csv
 cost_derived*.csv
@@ -57,6 +57,7 @@ Thumbs.db
 
 test_scripts
 
+reports/
 
 
 

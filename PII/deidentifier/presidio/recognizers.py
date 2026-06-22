@@ -13,9 +13,11 @@ Registers eight entity types:
 """
 from __future__ import annotations
 
+from presidio_analyzer import Pattern, PatternRecognizer, EntityRecognizer, RecognizerResult
+
+
 
 def _build_date_of_birth_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="DATE_OF_BIRTH",
@@ -50,7 +52,6 @@ def _build_date_of_birth_recognizer():
 
 
 def _build_mrn_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="MEDICAL_RECORD_NUMBER",
@@ -80,23 +81,24 @@ def _build_mrn_recognizer():
                 score=0.88,
             ),
             # Bare alphanumeric hospital/clinic ID (e.g. RF-203948, MGH-884721)
-            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            # Base score below threshold — only fires when a context keyword boosts it (+0.35).
+            # Without context, patterns like INV-2023 (invoice numbers) would be false positives.
             Pattern(
                 name="mrn_alpha_prefix_numeric",
                 regex=r"\b[A-Z]{2,4}-\d{4,8}\b",
-                score=0.55,
+                score=0.20,
             ),
             # Compound alphanumeric ID (e.g. HLT-9982-AX19 insurance policy)
-            # score 0.55 → boosted to 0.90 when a context keyword is nearby
+            # Same rationale — invoice numbers like INV-2023-7594 match this pattern.
             Pattern(
                 name="mrn_compound_alpha",
                 regex=r"\b[A-Z]{2,4}-\d{2,6}-[A-Z0-9]{2,6}\b",
-                score=0.55,
+                score=0.20,
             ),
             Pattern(
                 name="mrn_bare_number",
                 regex=r"\b\d{6,10}\b",
-                score=0.40,
+                score=0.20,
             ),
         ],
         context=[
@@ -119,7 +121,6 @@ def _build_mrn_recognizer():
 
 
 def _build_age_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="AGE",
@@ -149,7 +150,6 @@ def _build_age_recognizer():
 
 
 def _build_zip_code_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="ZIP_CODE",
@@ -173,7 +173,6 @@ def _build_zip_code_recognizer():
 
 
 def _build_npi_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="MEDICAL_LICENSE",
@@ -204,7 +203,6 @@ def _build_npi_recognizer():
 
 
 def _build_bank_number_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="US_BANK_NUMBER",
@@ -229,7 +227,6 @@ def _build_bank_number_recognizer():
 
 
 def _build_mbi_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="MEDICARE_ID",
@@ -256,7 +253,6 @@ def _build_mbi_recognizer():
 
 
 def _build_url_recognizer():
-    from presidio_analyzer import Pattern, PatternRecognizer
 
     return PatternRecognizer(
         supported_entity="URL",
@@ -287,7 +283,6 @@ def _build_url_recognizer():
 
 
 def _build_org_recognizer():
-    from presidio_analyzer import EntityRecognizer, RecognizerResult
 
     class SpacyOrgRecognizer(EntityRecognizer):
         def __init__(self):
@@ -320,10 +315,164 @@ def _build_org_recognizer():
 
     return SpacyOrgRecognizer()
 
+def _build_compact_date_recognizer():
+    """
+    Catches date formats that Presidio's built-ins miss:
+      - 20thmay2024, 1stJan2025, 3rdfeb24       (ordinal + month jammed against digits)
+      - 20may2024, 5dec99                       (no ordinal, no separators)
+      - 20 May 2024, 20th May 2024              (spaced with optional ordinal)
+      - May 20, 2024, May 20 2024               (month first)
+      - 20-May-2024, 20.May.2024, 20/May/2024   (dash/dot/slash + month name)
+      - 20240520                                (ISO compact, with strict YYYYMMDD shape)
+
+    Presidio's built-in DateRecognizer handles:
+      - 2024-05-20, 05/20/2024, 20/05/2024      (all-numeric, separated)
+      - May 20, 2024                            (sometimes — varies by NLP backend)
+
+    Combined coverage: every common written date format users actually type.
+    """
+
+    MONTHS = (
+        r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?)"
+    )
+
+    return PatternRecognizer(
+        supported_entity="DATE_TIME",
+        patterns=[
+            # 20thmay2024, 1stJan2025
+            Pattern(
+                name="date_compact_ordinal",
+                regex=rf"(?i)\b\d{{1,2}}(?:st|nd|rd|th){MONTHS}\d{{2,4}}\b",
+                score=0.88,
+            ),
+            # 20may2024, 5dec99
+            Pattern(
+                name="date_compact_no_ordinal",
+                regex=rf"(?i)\b\d{{1,2}}{MONTHS}\d{{2,4}}\b",
+                score=0.85,
+            ),
+            # 20 May 2024, 20th May 2024
+            Pattern(
+                name="date_spaced_with_optional_ordinal",
+                regex=rf"(?i)\b\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\s+\d{{2,4}}\b",
+                score=0.88,
+            ),
+            # May 20, 2024 / May 20 2024 / May 20th, 2024
+            Pattern(
+                name="date_month_first",
+                regex=rf"(?i)\b{MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{2,4}}\b",
+                score=0.88,
+            ),
+            # 20-May-2024, 20.May.2024, 20/May/2024
+            Pattern(
+                name="date_separator_with_month_name",
+                regex=rf"(?i)\b\d{{1,2}}[\-./]{MONTHS}[\-./]\d{{2,4}}\b",
+                score=0.88,
+            ),
+            # ISO compact: 20240520 (strict YYYYMMDD: 1900-2099, valid month, valid day)
+            # Strict shape avoids matching arbitrary 8-digit numbers (bank accounts, etc.)
+            Pattern(
+                name="date_iso_compact",
+                regex=r"\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b",
+                score=0.70,
+            ),
+        ],
+        context=[
+            "date", "on", "admitted", "joined", "born", "dob", "until",
+            "since", "from", "scheduled", "appointment", "visit", "discharged",
+        ],
+    )
+
+def _build_gender_recognizer():
+    """
+    Catches explicit gender terms and honorifics. NO pronouns
+    (he/she/his/her/him/hers) — they appear in nearly every paragraph
+    and would explode false positives.
+
+    Gender alone is a weak quasi-identifier (binary or trinary partition
+    of population). The score is intentionally just above the default
+    threshold so it gets detected, but the value is in combination with
+    other QIs — never as a standalone PII alarm.
+    """
+
+    return PatternRecognizer(
+        supported_entity="GENDER",
+        patterns=[
+            # Explicit gender nouns (singular + plural)
+            Pattern(
+                name="gender_noun",
+                regex=(
+                    r"(?i)\b(?:male|female|males|females|"
+                    r"man|woman|men|women|"
+                    r"boy|girl|boys|girls|"
+                    r"gentleman|lady|gentlemen|ladies)\b"
+                ),
+                score=0.40,
+            ),
+            # Honorifics (often adjacent to a name → identifying combination)
+            # Mx. is gender-neutral but still a gender marker
+            Pattern(
+                name="gender_honorific",
+                regex=r"(?i)\b(?:Mr|Mrs|Ms|Mx|Mister|Missus)\.?(?=\s|$)",
+                score=0.45,
+            ),
+            # Explicit gender keyword phrases (clinical/form contexts)
+            # "Gender: Male", "Sex: F"
+            Pattern(
+                name="gender_keyword_value",
+                regex=r"(?i)\b(?:gender|sex)\s*[:=]\s*(?:m|f|male|female|man|woman|other)\b",
+                score=0.85,
+            ),
+        ],
+        context=[
+            "gender", "sex", "patient", "identifies as",
+            "biological sex", "assigned sex",
+        ],
+    )
+
+def _build_ssn_recognizer():
+    """
+    Stronger US_SSN detector than Presidio's built-in.
+
+    Presidio's built-in UsSsnRecognizer scores bare SSN format (XXX-XX-XXXX)
+    at only 0.05; even with the "SSN" context boost (+0.35) it lands at 0.4,
+    which can fall under stricter score thresholds. This recognizer scores
+    the standard formats at high confidence directly, so detection doesn't
+    rely on context-boost luck.
+
+    Excludes area numbers 000 and 666 (never valid US SSNs).
+    """
+    return PatternRecognizer(
+        supported_entity="US_SSN",
+        patterns=[
+            # XXX-XX-XXXX (dashes), XXX XX XXXX (spaces), XXX.XX.XXXX (dots)
+            Pattern(
+                name="ssn_separated",
+                regex=r"\b(?!000|666)\d{3}[-\s.]\d{2}[-\s.]\d{4}\b",
+                score=0.85,
+            ),
+            # 9 consecutive digits — needs context boost to cross threshold,
+            # avoiding false positives on bank/phone numbers
+            Pattern(
+                name="ssn_nine_digits",
+                regex=r"\b(?!000000000|666\d{6})\d{9}\b",
+                score=0.40,
+            ),
+        ],
+        context=[
+            "ssn", "ssn#", "ssn:", "ss#",
+            "social security", "social security number",
+            "social security #",
+        ],
+    )
+
 
 def register_all(registry) -> None:
     """Register all custom recognizers into a Presidio RecognizerRegistry."""
     registry.add_recognizer(_build_date_of_birth_recognizer())
+    registry.add_recognizer(_build_compact_date_recognizer())
     registry.add_recognizer(_build_mrn_recognizer())
     registry.add_recognizer(_build_age_recognizer())
     registry.add_recognizer(_build_zip_code_recognizer())
@@ -332,3 +481,5 @@ def register_all(registry) -> None:
     registry.add_recognizer(_build_mbi_recognizer())
     registry.add_recognizer(_build_url_recognizer())
     registry.add_recognizer(_build_org_recognizer())
+    registry.add_recognizer(_build_gender_recognizer())
+    registry.add_recognizer(_build_ssn_recognizer())

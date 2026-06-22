@@ -1,5 +1,5 @@
 -- ============================================================================
--- Signal Observability — Seed Data (v5 schema)
+-- Compass Observability — Seed Data (v5 schema)
 -- Scope: registry tables + bindings ONLY. Thresholds come later.
 --
 -- Two solutions:

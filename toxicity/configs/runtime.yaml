@@ -1,0 +1,19 @@
+models:
+  prompt_injection:
+    repo_id:    "Krishagarwal314/safety-prompt-injection"
+    local_path: "models/prompt_injection"
+
+  moderation:
+    repo_id:    "navodPeiris/minilm-toxic-spam-classifier"
+    local_path: "models/minilm_toxic_spam"
+
+thresholds:
+  # Score thresholds above which a label is emitted.
+  prompt_injection_review: 0.50
+  harmful_content_review:  0.83
+
+runtime:
+  device:        "cuda"      # "cpu" or "cuda" — controls the PyTorch PI model
+  onnx_provider: "auto"      # "auto" | "cpu" | "cuda" — controls the MiniLM ONNX model
+  max_length:    512
+  fp16_on_cuda:  true        # halve PI GPU memory; ignored on CPU

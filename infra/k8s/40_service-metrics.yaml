@@ -1,0 +1,59 @@
+# Headless service for the Safety StatefulSet's stable DNS.
+# Pods become resolvable as compass-worker-safety-0.compass-worker-safety.compass.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: compass-worker-safety
+  namespace: compass
+  labels:
+    app: compass-worker
+    lens: safety
+spec:
+  clusterIP: None    # headless
+  selector:
+    app: compass-worker
+    lens: safety
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+---
+# Headless service for the Quality StatefulSet's stable DNS.
+# Pods become resolvable as compass-worker-quality-0.compass-worker-quality.compass.svc.cluster.local
+# Selector matches the labels in 31_statefulset-quality.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: compass-worker-quality
+  namespace: compass
+  labels:
+    app: compass-worker
+    lens: quality
+spec:
+  clusterIP: None    # headless
+  selector:
+    app: compass-worker
+    lens: quality
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+---
+# Service used by Prometheus to discover all worker pods (all four lenses).
+# Selector is intentionally label-only so any new lens that carries
+# `app=compass-worker` gets picked up automatically.
+apiVersion: v1
+kind: Service
+metadata:
+  name: compass-worker-metrics
+  namespace: compass
+  labels:
+    app: compass-worker
+spec:
+  clusterIP: None
+  selector:
+    app: compass-worker
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
