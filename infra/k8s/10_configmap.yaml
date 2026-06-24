@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compass-worker-config
+  namespace: compass
+data:
+  # ── Datastore connections (override per environment) ──
+  CH_HOST: "clickhouse.compass.svc.cluster.local"
+  CH_PORT: "8123"
+  CH_DB: "compass"
+  CH_USER: "default"
+
+  # ── Worker run loop ──
+  WORKER_BATCH: "5000"
+  WORKER_POLL_SEC: "5.0"
+  COMPASS_TOGGLE_TTL: "300"
+
+  # ── Per-lens batch + poll overrides ──
+  # Pattern:
+  #   WORKER_BATCH_<LENS>      — fetches per slot per iteration for that lens
+  #   WORKER_POLL_SEC_<LENS>   — idle sleep AFTER a partial/empty batch
+  #
+  # Drain-when-busy semantics (see BaseWorker.run_poll):
+  #   full batch  -> immediate re-poll, no sleep (drain mode)
+  #   partial     -> process, then sleep <poll_sec> before re-polling
+  #   empty       -> sleep <poll_sec> before re-polling
+  #
+  # Tuned per the lens's CPU cost per span:
+  #   Performance / Cost — cheap; big batches drain fast under load, poll
+  #                        fast when idle so dashboards stay fresh.
+  #   Safety            — moderate (Presidio PII + 2 toxicity models);
+  #                        medium batch keeps wall-time per batch bounded.
+  #   Quality           — expensive on CPU (NLI + embedding); small batch
+  #                        keeps per-batch wall-time bounded, long idle
+  #                        poll because semantic scoring at low traffic
+  #                        doesn't need second-by-second freshness.
+  WORKER_BATCH_PERFORMANCE: "5000"
+  WORKER_BATCH_COST:        "5000"
+  WORKER_BATCH_SAFETY:      "1000"
+  WORKER_BATCH_QUALITY:     "600"
+ 
+  WORKER_POLL_SEC_PERFORMANCE: "2.0"
+  WORKER_POLL_SEC_COST:        "2.0"
+  WORKER_POLL_SEC_SAFETY:      "5.0"
+  WORKER_POLL_SEC_QUALITY:     "120.0"
+
+  # ── Horizontal scaling ──
+  # WORKER_PARTITION_COUNT is set per-Deployment/StatefulSet, NOT here,
+  # because it differs by lens (Performance=1, Cost=1, Safety=N).
+  # WORKER_PARTITION_INDEX is derived from POD_NAME by run_worker.py.
+  WORKER_PARTITION_TOTAL_SLOTS: "16"
+
+  # ── Observability ──
+  OBSERVABILITY_PORT: "8080"
+
+  # ── Safety lens (harmless for other lenses; they don't import the package) ──
+  COMPASS_PII_NER_MODEL="gravitee-io/bert-small-pii-detection"
+  COMPASS_PII_BATCH_SIZE="4"
+  COMPASS_PII_CACHE_MAX="20000"
+  COMPASS_TOXICITY_BATCH_SIZE="32"
+  COMPASS_TOXICITY_CACHE_MAX="10000"
+  COMPASS_TOXICITY_DEVICE="cpu"
+  COMPASS_TOXICITY_ONNX_PROVIDER="auto"
+  COMPASS_TOXICITY_MAX_LENGTH="512"
+  COMPASS_TOXICITY_FP16="true"
+  COMPASS_TOXICITY_PI_THRESHOLD="0.50"
+  COMPASS_TOXICITY_HARMFUL_THRESHOLD="0.50"
+
+  # ── Quality lens ──
+  # Model paths (NLI/EMBED/RELEVANCE) and MODELS_ROOT are NOT set here —
+  # they're baked into the image's ENV in Dockerfile.quality so the lens
+  # always finds the right tree inside /opt/models. Only operational knobs
+  # belong in the ConfigMap.
+  #
+  # SEMANTIC=0 turns off model loading entirely → only the 6 mechanical
+  # metrics emit (format_correctness, schema_conformance, tool_call_validity,
+  # data_completeness, data_accuracy, constraint_satisfaction). Use this if
+  # you want a fast, no-GPU "is structure right" compass.
+  COMPASS_QUALITY_SEMANTIC:           "1"
+  COMPASS_QUALITY_SAMPLE:             "1.0"     # 0.1 = score 10% of spans (stable per span_id)
+  COMPASS_QUALITY_BATCH:              "32"      # sentence-transformers batch_size
+  COMPASS_QUALITY_CACHE_MAX:          "20000"   # per-worker LRU cache of scoring results
+  COMPASS_QUALITY_DEVICE:             "cpu"     # set "cuda" if running on GPU nodes
+  COMPASS_QUALITY_PREMISE_MAX_CHARS:  "2000"
+  COMPASS_QUALITY_MAX_SENTS:          "10"
+  COMPASS_QUALITY_SENT_MIN_CHARS:     "3"
+  COMPASS_QUALITY_CHUNK_USED_COS:     "0.5"

@@ -1,6 +1,6 @@
 -- ============================================================================
--- Signal Observability — ClickHouse v2 DDL
--- Drops the existing Signal objects, then creates the v2 tables + base-grain MV.
+-- Compass Observability — ClickHouse v2 DDL
+-- Drops the existing Compass objects, then creates the v2 tables + base-grain MV.
 --
 -- v2 changes baked in:
 --   * explicit `scope` column (solution/endpoint/workflow/agent/component)
@@ -15,14 +15,14 @@
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 0. DATABASE — create and switch to `signal` (else objects land in `default`)
+-- 0. DATABASE — create and switch to `compass` (else objects land in `default`)
 -- ----------------------------------------------------------------------------
-CREATE DATABASE IF NOT EXISTS signal;
-USE signal;
+CREATE DATABASE IF NOT EXISTS compass;
+USE compass;
 
 -- ----------------------------------------------------------------------------
--- 0b. RESET — drop existing Signal objects (now scoped to the `signal` db)
---    (inspect first with:  SHOW TABLES FROM signal;)
+-- 0b. RESET — drop existing Compass objects (now scoped to the `compass` db)
+--    (inspect first with:  SHOW TABLES FROM compass;)
 --    Drop the MV(s) before the tables they read/write.
 -- ----------------------------------------------------------------------------
 DROP VIEW  IF EXISTS mv_agg_base;
@@ -30,22 +30,28 @@ DROP VIEW  IF EXISTS mv_agg_30s;
 DROP VIEW  IF EXISTS mv_agg_5m;
 DROP VIEW  IF EXISTS mv_agg_1h;
 DROP VIEW  IF EXISTS mv_agg_1d;
-DROP TABLE IF EXISTS signal_aggregated_metrics;
-DROP TABLE IF EXISTS signal_derived_metrics;
-DROP TABLE IF EXISTS signal_raw_spans;
+DROP TABLE IF EXISTS compass_aggregated_metrics;
+DROP TABLE IF EXISTS compass_derived_metrics;
+DROP TABLE IF EXISTS compass_raw_spans;
 -- To wipe the whole database instead (DESTRUCTIVE — removes everything in it):
---   DROP DATABASE IF EXISTS signal;  CREATE DATABASE signal;
+--   DROP DATABASE IF EXISTS compass;  CREATE DATABASE compass;
 
 -- ----------------------------------------------------------------------------
--- 1. signal_raw_spans  (immutable span tree)
+-- 1. compass_raw_spans  (immutable span tree)
 -- ----------------------------------------------------------------------------
-CREATE TABLE signal_raw_spans
+CREATE TABLE compass_raw_spans
 (
     trace_id        String,
     span_id         String,
     parent_span_id  String DEFAULT '',
     correlation_id  String DEFAULT '',
     session_id      String DEFAULT '',
+
+    -- Deterministic 16-way partition for horizontal worker scaling.
+    -- Computed at ingestion from trace_id; used by lens workers to fetch
+    -- a fixed slice of spans without coordination. See
+    -- compass-workers/compass_worker/partition.py.
+    partition_id    UInt8 MATERIALIZED cityHash64(trace_id) % 16,
 
     span_type       LowCardinality(String),   -- solution/workflow/agent/model_call/tool_call/embedding/retrieval/memory_read/skill_exec/parsing/validation
     span_name       String,
@@ -77,7 +83,9 @@ CREATE TABLE signal_raw_spans
     -- temperature/max_tokens, error_type/code/message/source/severity, ...) lives in one JSON blob:
     metadata        String DEFAULT '' CODEC(ZSTD(3)),
 
-    recorded_at     DateTime64(3, 'UTC') DEFAULT now64(3)
+    recorded_at     DateTime64(3, 'UTC') DEFAULT now64(3),
+
+    INDEX idx_partition_id partition_id TYPE set(16) GRANULARITY 8
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(started_at)
@@ -85,9 +93,9 @@ ORDER BY (solution_id, span_type, started_at, trace_id, span_id)
 TTL toDateTime(started_at) + INTERVAL 90 DAY;
 
 -- ----------------------------------------------------------------------------
--- 2. signal_derived_metrics  (EAV — one row per metric per span)
+-- 2. compass_derived_metrics  (EAV — one row per metric per span)
 -- ----------------------------------------------------------------------------
-CREATE TABLE signal_derived_metrics
+CREATE TABLE compass_derived_metrics
 (
     span_id        String,
     trace_id       String DEFAULT '',                 -- links the metric to its trace (denormalized for per-trace queries)
@@ -113,21 +121,21 @@ CREATE TABLE signal_derived_metrics
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (solution_id, scope, metric, ts, component_id)
-TTL toDateTime(ts) + INTERVAL 90 DAY;
+TTL toDateTime(ts) + INTERVAL 90 DAY
 SETTINGS
     -- Idempotent worker writes: ClickHouse remembers the last N insert tokens
     -- and drops re-inserts that carry a matching insert_deduplication_token,
     -- which also prevents the MV from firing twice. Workers pass a deterministic
-    -- token per batch (see signal_worker/base.py:run_poll). Window of 1000 is
+    -- token per batch (see compass_worker/base.py:run_poll). Window of 1000 is
     -- vastly more than the worst-case "crash between write and save_checkpoint"
     -- gap; we'd only need it to cover one stale batch.
     non_replicated_deduplication_window = 1000;
 
 -- ----------------------------------------------------------------------------
--- 3. signal_aggregated_metrics  (AggregatingMergeTree — aggregate states)
+-- 3. compass_aggregated_metrics  (AggregatingMergeTree — aggregate states)
 --    No `window` column: one base grain, coarser windows merged on read.
 -- ----------------------------------------------------------------------------
-CREATE TABLE signal_aggregated_metrics
+CREATE TABLE compass_aggregated_metrics
 (
     scope          LowCardinality(String),
     solution_id    String,
@@ -157,7 +165,7 @@ TTL toDateTime(ts) + INTERVAL 365 DAY;
 -- 4. Materialized view — derived -> aggregated, BASE GRAIN = 1 MINUTE
 --    Change INTERVAL 1 MINUTE -> 30 SECOND (both places) for sub-minute tailing.
 -- ----------------------------------------------------------------------------
-CREATE MATERIALIZED VIEW mv_agg_base TO signal_aggregated_metrics AS
+CREATE MATERIALIZED VIEW mv_agg_base TO compass_aggregated_metrics AS
 SELECT
     scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric,
     ts,                                            -- bucketed in the subquery below; name matches target column
@@ -174,7 +182,7 @@ FROM
         scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric,
         value, confidence,
         toStartOfInterval(ts, INTERVAL 1 MINUTE) AS ts   -- replaces raw ts with the 1-min bucket
-    FROM signal_derived_metrics
+    FROM compass_derived_metrics
 )
 GROUP BY
     scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric, ts;
@@ -185,7 +193,7 @@ GROUP BY
 --    b) load derived_metrics CSV  -> mv_agg_base fires -> aggregated fills
 --    If derived was loaded BEFORE the MV existed, backfill aggregated once:
 -- ----------------------------------------------------------------------------
--- INSERT INTO signal_aggregated_metrics
+-- INSERT INTO compass_aggregated_metrics
 -- SELECT
 --     scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric, ts,
 --     count(), sum(value), min(value), max(value), avgState(value),
@@ -194,7 +202,7 @@ GROUP BY
 -- (
 --     SELECT scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric,
 --            value, confidence, toStartOfInterval(ts, INTERVAL 1 MINUTE) AS ts
---     FROM signal_derived_metrics
+--     FROM compass_derived_metrics
 -- )
 -- GROUP BY
 --     scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric, ts;
@@ -205,7 +213,7 @@ GROUP BY
 -- p95 latency for agt_classify in sol_support over its 5m threshold window:
 -- SELECT quantilesTDigestMerge(0.95)(quantiles) AS p95,
 --        avgMerge(avg_value) AS avg, sum(count) AS n
--- FROM signal_aggregated_metrics
+-- FROM compass_aggregated_metrics
 -- WHERE scope='agent' AND solution_id='sol_support'
 --   AND workflow_id='wf_docunderstand' AND agent_id='agt_classify'
 --   AND metric='latency' AND environment='prod'
@@ -213,7 +221,7 @@ GROUP BY
 --
 -- Daily cost by model (1d window):
 -- SELECT component_id, sum(sum_value) AS total_cost
--- FROM signal_aggregated_metrics
+-- FROM compass_aggregated_metrics
 -- WHERE scope='component' AND component_type='model' AND metric='cost'
 --   AND ts >= now() - INTERVAL 1 DAY
 -- GROUP BY component_id ORDER BY total_cost DESC;
@@ -221,8 +229,8 @@ GROUP BY
 -- ----------------------------------------------------------------------------
 -- 7. OPTIONAL — coarse cascade tier (add later only if wide/1d reads get heavy)
 -- ----------------------------------------------------------------------------
--- CREATE TABLE signal_aggregated_metrics_1h AS signal_aggregated_metrics;  -- same shape
--- CREATE MATERIALIZED VIEW mv_agg_1h TO signal_aggregated_metrics_1h AS
+-- CREATE TABLE compass_aggregated_metrics_1h AS compass_aggregated_metrics;  -- same shape
+-- CREATE MATERIALIZED VIEW mv_agg_1h TO compass_aggregated_metrics_1h AS
 -- SELECT
 --     scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric, ts,
 --     sum(count) AS count, sum(sum_value) AS sum_value, min(min_value) AS min_value, max(max_value) AS max_value,
@@ -231,6 +239,6 @@ GROUP BY
 --     avgMergeState(avg_confidence) AS avg_confidence
 -- FROM
 -- (
---     SELECT * EXCEPT (ts), toStartOfInterval(ts, INTERVAL 1 HOUR) AS ts FROM signal_aggregated_metrics
+--     SELECT * EXCEPT (ts), toStartOfInterval(ts, INTERVAL 1 HOUR) AS ts FROM compass_aggregated_metrics
 -- )
 -- GROUP BY scope, solution_id, endpoint, workflow_id, agent_id, component_id, component_type, environment, metric, ts;

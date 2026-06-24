@@ -1,0 +1,23 @@
+models:
+  nli:
+    repo_id:    "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    local_path: "models/nli"
+
+  embedding:
+    repo_id:    "sentence-transformers/all-MiniLM-L6-v2"
+    local_path: "models/embedding"
+
+  relevance:
+    repo_id:    "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    local_path: "models/relevance"
+
+# Recipe constants. Override to retune without touching code.
+recipes:
+  premise_max_chars: 2000     # truncate grounding text fed to the NLI model
+  max_sents:         10       # cap sentences per side; keeps pair counts bounded
+  sent_min_chars:    3        # drop near-empty sentence fragments
+  chunk_used_cos:    0.5      # cosine above this = "the answer used this chunk"
+
+runtime:
+  device:     "cpu"           # "cpu" or "cuda" — passed to the model adapters
+  batch_size: 32              # forward-pass width for NLI / embedding / relevance

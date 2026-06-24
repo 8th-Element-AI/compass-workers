@@ -35,6 +35,6 @@ state-dir
 infra/data
 infra/**/*.csv
 
-# Docs (only README under signal-workers is referenced)
+# Docs (only README under compass-workers is referenced)
 **/*.md
-!signal-workers/README.md
+!compass-workers/README.md

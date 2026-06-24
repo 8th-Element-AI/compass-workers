@@ -1,7 +1,7 @@
 # ============================================================================
-# Signal Workers — runtime dependencies
+# Compass Workers — runtime dependencies
 # ============================================================================
-# Install (from the signal-workers/ directory, with the PII repo sitting beside it):
+# Install (from the compass-workers/ directory, with the PII repo sitting beside it):
 #     pip install -r requirements.txt
 #
 # The PII module ships as its own pip-installable package and is referenced by
@@ -28,12 +28,11 @@ pydantic_settings
 #     python -m spacy download en_core_web_sm
 #
 # To use a HuggingFace NER model instead (better recall, ~330 ms/doc),
-# pre-cache it once and set SIGNAL_PII_NER_MODEL:
+# pre-cache it once and set COMPASS_PII_NER_MODEL:
 #     python -c "from transformers import pipeline; \
 #                pipeline('ner', model='gravitee-io/bert-small-pii-detection', \
 #                aggregation_strategy='first')"
-#     export SIGNAL_PII_NER_MODEL=gravitee-io/bert-small-pii-detection
--r ./PII/requirements.txt
--e ./PII
+#     export COMPASS_PII_NER_MODEL=gravitee-io/bert-small-pii-detection
 
+-e ./PII[hf]
 -e ./toxicity

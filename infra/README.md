@@ -1,6 +1,6 @@
-# Signal Infra — Postgres + ClickHouse
+# Compass Infra — Postgres + ClickHouse
 
-Brings up the two datastores the Signal platform runs on:
+Brings up the two datastores the Compass platform runs on:
 
 - **Postgres** — registry (solutions, endpoints, workflows, agents, components,
   bindings), thresholds, and worker checkpoints. The "what exists / what should
@@ -13,8 +13,8 @@ Applies all schema + seed config on first boot, exposes the ports the workers
 
 | Service | Container | Purpose | Host ports |
 |---|---|---|---|
-| postgres | `signal-postgres` | Registry, bindings, thresholds, worker_checkpoints | `5432` |
-| clickhouse | `signal-clickhouse` | Raw spans, derived metrics, aggregated metrics | `8123` (HTTP), `9000` (native) |
+| postgres | `compass-postgres` | Registry, bindings, thresholds, worker_checkpoints | `5432` |
+| clickhouse | `compass-clickhouse` | Raw spans, derived metrics, aggregated metrics | `8123` (HTTP), `9000` (native) |
 
 ---
 
@@ -47,7 +47,7 @@ infra/
 │       ├── 00_schema.sql              v5 schema: enums, 7 registry tables, indexes
 │       ├── 01_registry_bindings.sql   seeded solutions/endpoints/workflows/agents/components + bindings
 │       ├── 02_thresholds.sql          721 seeded thresholds (perf/quality/cost/safety/outcomes)
-│       └── 03_worker_checkpoints.sql  worker high-watermark table (lens, partition_key, watermark)
+│       └── 03_worker_checkpoints.sql  worker high-checkpoint table (lens, partition_key, checkpoint)
 ├── clickhouse/
 │   └── init/
 │       └── 00_schema.sql              raw_spans + derived_metrics + aggregated + mv_agg_base MV
@@ -55,8 +55,8 @@ infra/
 │   ├── load_clickhouse.ps1            load span/derived CSVs into CH (data not in init)
 │   └── verify.ps1                     row counts across both stores
 └── data/                              drop the CSVs here before loading (gitignored)
-    ├── signal_raw_spans.csv
-    └── signal_derived_metrics.csv
+    ├── compass_raw_spans.csv
+    └── compass_derived_metrics.csv
 ```
 
 ---
@@ -68,7 +68,7 @@ infra/
 - Ports `5432`, `8123`, `9000` available on the host (override in `.env` if not).
 
 That's it for the infra stack itself. To actually flow data through it you'll
-also need the `signal-workers` package on the host (or in containers).
+also need the `compass-workers` package on the host (or in containers).
 
 ---
 
@@ -117,7 +117,7 @@ Both images run any `*.sql` they find under `/docker-entrypoint-initdb.d/` —
 filename order. So:
 
 - **Postgres** runs `00_schema` → `01_registry_bindings` → `02_thresholds` → `03_worker_checkpoints`.
-- **ClickHouse** runs `00_schema` which creates the `signal` database, the three
+- **ClickHouse** runs `00_schema` which creates the `compass` database, the three
   tables, and the `mv_agg_base` materialized view.
 
 The large telemetry CSVs are **not** init scripts (too big, ~100MB+). Load them
@@ -162,14 +162,14 @@ with your actual entity registry before the first boot.
 
 ### 5.3 Worker checkpoints (`03_worker_checkpoints.sql`)
 
-One row per `(lens, partition_key)`. Each worker UPSERTs its high-watermark
+One row per `(lens, partition_key)`. Each worker UPSERTs its high-checkpoint
 after every batch:
 
 ```sql
 CREATE TABLE worker_checkpoints (
     lens          TEXT        NOT NULL,
     partition_key TEXT        NOT NULL DEFAULT 'default',
-    watermark     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
+    checkpoint     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by    TEXT,                          -- HOSTNAME of the writer pod
     PRIMARY KEY (lens, partition_key)
@@ -186,33 +186,33 @@ CREATE TABLE worker_checkpoints (
 ### 6.1 Three tables, one materialized view
 
 ```
-signal_raw_spans          (MergeTree)                  — immutable span tree
+compass_raw_spans          (MergeTree)                  — immutable span tree
         │
         ▼
-signal_derived_metrics    (MergeTree + dedup window)   — workers write here
+compass_derived_metrics    (MergeTree + dedup window)   — workers write here
         │
         ▼  (mv_agg_base fires on every insert)
-signal_aggregated_metrics (AggregatingMergeTree)       — 1-min rollup buckets
+compass_aggregated_metrics (AggregatingMergeTree)       — 1-min rollup buckets
 ```
 
 | Table | Engine | Partition | TTL | Notes |
 |---|---|---|---|---|
-| `signal_raw_spans` | MergeTree | `toYYYYMM(started_at)` (monthly) | 90 days | Read-only for workers |
-| `signal_derived_metrics` | MergeTree | `toYYYYMMDD(ts)` (daily) | 90 days | `non_replicated_deduplication_window = 1000` for idempotent writes |
-| `signal_aggregated_metrics` | AggregatingMergeTree | `toYYYYMM(ts)` (monthly) | 365 days | Stores aggregate-function states; read with `*Merge` combinators |
+| `compass_raw_spans` | MergeTree | `toYYYYMM(started_at)` (monthly) | 90 days | Read-only for workers |
+| `compass_derived_metrics` | MergeTree | `toYYYYMMDD(ts)` (daily) | 90 days | `non_replicated_deduplication_window = 1000` for idempotent writes |
+| `compass_aggregated_metrics` | AggregatingMergeTree | `toYYYYMM(ts)` (monthly) | 365 days | Stores aggregate-function states; read with `*Merge` combinators |
 
 ### 6.2 The dedup window
 
-The `non_replicated_deduplication_window = 1000` setting on `signal_derived_metrics`
+The `non_replicated_deduplication_window = 1000` setting on `compass_derived_metrics`
 is what makes worker writes idempotent: a re-attempted insert with a previously-
 seen `insert_deduplication_token` is dropped silently, and the materialized view
-does not fire. See `signal-workers/README.md` S "Data correctness guarantees".
+does not fire. See `compass-workers/README.md` S "Data correctness guarantees".
 
 To verify the setting is present:
 
 ```bash
-docker exec -it signal-clickhouse clickhouse-client --database signal \
-    --query "SHOW CREATE TABLE signal_derived_metrics" \
+docker exec -it compass-clickhouse clickhouse-client --database compass \
+    --query "SHOW CREATE TABLE compass_derived_metrics" \
     | grep deduplication
 ```
 
@@ -221,14 +221,14 @@ You should see `non_replicated_deduplication_window = 1000` in the output.
 If you find it missing on an existing deployment, apply it without rebuilding:
 
 ```bash
-docker exec -i signal-clickhouse clickhouse-client --database signal \
-    --query "ALTER TABLE signal_derived_metrics MODIFY SETTING non_replicated_deduplication_window = 1000"
+docker exec -i compass-clickhouse clickhouse-client --database compass \
+    --query "ALTER TABLE compass_derived_metrics MODIFY SETTING non_replicated_deduplication_window = 1000"
 ```
 
 ### 6.3 The materialized view
 
-`mv_agg_base` rolls every insert into `signal_derived_metrics` into 1-minute
-buckets in `signal_aggregated_metrics`. Coarser windows (5m, 1h, 1d) are
+`mv_agg_base` rolls every insert into `compass_derived_metrics` into 1-minute
+buckets in `compass_aggregated_metrics`. Coarser windows (5m, 1h, 1d) are
 **not separate tables** — they're computed at read time by merging base
 buckets:
 
@@ -236,7 +236,7 @@ buckets:
 -- 1h p95 latency
 SELECT toStartOfHour(ts) AS hour,
        quantilesTDigestMerge(0.95)(quantiles) AS p95
-FROM signal_aggregated_metrics
+FROM compass_aggregated_metrics
 WHERE metric = 'latency' AND solution_id = 'sol_support'
 GROUP BY hour;
 ```
@@ -264,15 +264,15 @@ After the stack is up, place the two CSVs in `.\data\` and run:
 What it does:
 
 1. `docker cp` both CSVs into `/tmp/` inside the CH container.
-2. `INSERT INTO signal_raw_spans FORMAT CSVWithNames` from `/tmp/raw.csv`.
-3. `INSERT INTO signal_derived_metrics FORMAT CSVWithNames` from `/tmp/derived.csv` — this **also** fires the MV, filling `signal_aggregated_metrics` automatically.
+2. `INSERT INTO compass_raw_spans FORMAT CSVWithNames` from `/tmp/raw.csv`.
+3. `INSERT INTO compass_derived_metrics FORMAT CSVWithNames` from `/tmp/derived.csv` — this **also** fires the MV, filling `compass_aggregated_metrics` automatically.
 
-If you load `signal_derived_metrics` **before** the MV exists (e.g. you create
+If you load `compass_derived_metrics` **before** the MV exists (e.g. you create
 the MV later), do a one-time backfill:
 
 ```sql
 -- See infra/clickhouse/init/00_schema.sql "OPTIONAL BACKFILL" section
-INSERT INTO signal_aggregated_metrics
+INSERT INTO compass_aggregated_metrics
 SELECT
     scope, solution_id, endpoint, workflow_id, agent_id, component_id,
     component_type, environment, metric, ts,
@@ -284,7 +284,7 @@ FROM (
     SELECT scope, solution_id, endpoint, workflow_id, agent_id, component_id,
            component_type, environment, metric, value, confidence,
            toStartOfInterval(ts, INTERVAL 1 MINUTE) AS ts
-    FROM signal_derived_metrics
+    FROM compass_derived_metrics
 )
 GROUP BY scope, solution_id, endpoint, workflow_id, agent_id, component_id,
          component_type, environment, metric, ts;
@@ -328,7 +328,7 @@ SELECT count(*) FROM worker_checkpoints;
 -- expect: 0 (until workers start writing)
 
 -- ClickHouse: confirm the dedup setting is on
-SHOW CREATE TABLE signal_derived_metrics;
+SHOW CREATE TABLE compass_derived_metrics;
 -- look for: SETTINGS ... non_replicated_deduplication_window = 1000
 ```
 
@@ -342,10 +342,10 @@ Workers running on the host connect to `localhost:8123` (CH) and `localhost:5432
 (PG). Default ports in `.env.example`:
 
 ```bash
-# signal-workers/.env  (or similar)
+# compass-workers/.env  (or similar)
 CH_HOST=localhost
 CH_PORT=8123
-PG_DSN=postgresql://postgres:postgres@localhost:5432/signal
+PG_DSN=postgresql://postgres:postgres@localhost:5432/compass
 ```
 
 ### 9.2 Container mode (Docker Desktop)
@@ -354,9 +354,9 @@ Worker containers running on the same host need to reach the infra containers
 via the Docker bridge. Use `host.docker.internal`:
 
 ```bash
-# signal-workers/.env.docker
+# compass-workers/.env.docker
 CH_HOST=host.docker.internal
-PG_DSN=postgresql://postgres:postgres@host.docker.internal:5432/signal
+PG_DSN=postgresql://postgres:postgres@host.docker.internal:5432/compass
 ```
 
 (On Linux without Docker Desktop, use `--add-host=host.docker.internal:host-gateway`
@@ -370,12 +370,12 @@ ClickHouse, or a separate cluster namespace). Configure via Secret + ConfigMap:
 ```yaml
 env:
   - name: CH_HOST
-    valueFrom: { configMapKeyRef: { name: signal-worker-config, key: CH_HOST } }
+    valueFrom: { configMapKeyRef: { name: compass-worker-config, key: CH_HOST } }
   - name: PG_DSN
-    valueFrom: { secretKeyRef: { name: signal-worker-secrets, key: PG_DSN } }
+    valueFrom: { secretKeyRef: { name: compass-worker-secrets, key: PG_DSN } }
 ```
 
-See `signal-workers/README.md` S "Production deployment".
+See `compass-workers/README.md` S "Production deployment".
 
 ---
 
@@ -397,10 +397,10 @@ To apply a single SQL file to a running stack without losing other data:
 
 ```powershell
 # Postgres
-docker exec -i signal-postgres psql -U postgres -d signal < postgres/init/03_worker_checkpoints.sql
+docker exec -i compass-postgres psql -U postgres -d compass < postgres/init/03_worker_checkpoints.sql
 
 # ClickHouse
-docker exec -i signal-clickhouse clickhouse-client --database signal < clickhouse/init/some_alter.sql
+docker exec -i compass-clickhouse clickhouse-client --database compass < clickhouse/init/some_alter.sql
 ```
 
 ### Drop and recreate one table
@@ -409,15 +409,15 @@ docker exec -i signal-clickhouse clickhouse-client --database signal < clickhous
 -- ClickHouse: see infra/clickhouse/init/00_schema.sql S0b for a copy-pasteable
 -- "DROP THESE" block. The MV must be dropped before the tables it reads/writes.
 DROP VIEW  IF EXISTS mv_agg_base;
-DROP TABLE IF EXISTS signal_aggregated_metrics;
-DROP TABLE IF EXISTS signal_derived_metrics;
-DROP TABLE IF EXISTS signal_raw_spans;
+DROP TABLE IF EXISTS compass_aggregated_metrics;
+DROP TABLE IF EXISTS compass_derived_metrics;
+DROP TABLE IF EXISTS compass_raw_spans;
 ```
 
 Then re-run the init file:
 
 ```powershell
-docker exec -i signal-clickhouse clickhouse-client --database signal < clickhouse/init/00_schema.sql
+docker exec -i compass-clickhouse clickhouse-client --database compass < clickhouse/init/00_schema.sql
 ```
 
 ---
@@ -458,14 +458,14 @@ This compose stack is **for development**. For production:
 | ClickHouse out of memory on a big load | CH default memory limit | Pass `--max_memory_usage_for_user=8000000000` to clickhouse-client, or split the CSV |
 | Init scripts not re-running after edit | Volumes persist between `up`/`down`; init only runs on a clean volume | `docker compose down -v && docker compose up -d` (DESTRUCTIVE), or apply the edited file manually via `docker exec` |
 | `permission denied` on `init/` files inside container | File mode issue on the bind mount | `chmod 644 postgres/init/*.sql clickhouse/init/*.sql` and `up -d` again |
-| `signal-postgres` container name conflict | Previous deployment with same name | `docker rm -f signal-postgres signal-clickhouse` then `up -d` |
+| `compass-postgres` container name conflict | Previous deployment with same name | `docker rm -f compass-postgres compass-clickhouse` then `up -d` |
 | `SHOW CREATE TABLE` doesn't show the dedup setting | ALTER never applied on this deployment | See S 6.2 |
-| Postgres `role "signal" does not exist` from workers | `PG_DSN` user doesn't match the seeded user (which is `postgres`) | Either change DSN to `postgresql://postgres:postgres@host:5432/signal`, or `CREATE USER signal WITH PASSWORD '...'` and grant privileges |
+| Postgres `role "compass" does not exist` from workers | `PG_DSN` user doesn't match the seeded user (which is `postgres`) | Either change DSN to `postgresql://postgres:postgres@host:5432/compass`, or `CREATE USER compass WITH PASSWORD '...'` and grant privileges |
 
 ---
 
 ## Appendix — Related
 
-- **signal-workers/README.md** — the workers that read from these stores.
-- **signal-workers/ARCHITECTURE.md** — why the schema is shaped this way.
+- **compass-workers/README.md** — the workers that read from these stores.
+- **compass-workers/ARCHITECTURE.md** — why the schema is shaped this way.
 - **toxicity/** and **PII/** — sibling packages used by the Safety lens worker.

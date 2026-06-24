@@ -1,6 +1,6 @@
-# Signal Workers — Architecture
+# Compass Workers — Architecture
 
-The deep technical reference for the Signal observability workers. This document
+The deep technical reference for the Compass observability workers. This document
 covers **why** the system is shaped this way, what each design decision costs,
 and what's deferred and why. For **how** to install / configure / deploy, see
 `README.md`. For data store internals, see `infra/README.md`.
@@ -11,7 +11,7 @@ Audience: engineers extending the worker framework, reviewing data correctness
 
 Not in scope: model training (that's the safety-classifier and other repos),
               the consumer API on top of ClickHouse, the ingestion path that
-              fills signal_raw_spans.
+              fills compass_raw_spans.
 ```
 
 ---
@@ -42,7 +42,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
 |---|---|
 | **One metric registry per "lens"** (`performance`, `cost`, `safety`, …) | Each lens is its own Python package, its own Docker image, its own K8s Deployment, and its own checkpoint row in Postgres |
 | **Add a metric in one line** | The spec model: a metric is a `MetricSpec(applies, pattern, …)` declaration over a small shared library of patterns and predicates |
-| **Append-only writes, idempotent under restart** | Workers only `INSERT` into `signal_derived_metrics`; the materialized view does aggregation. CH insert-deduplication makes crashes and replays safe |
+| **Append-only writes, idempotent under restart** | Workers only `INSERT` into `compass_derived_metrics`; the materialized view does aggregation. CH insert-deduplication makes crashes and replays safe |
 | **Scale lenses independently** | Lenses share no state at runtime; Performance can lag without affecting Safety |
 | **Run the same compute offline** | The `--csv` path runs the identical `compute()` against an exported spans file with no DB |
 | **Production-deployable on Kubernetes** | Per-lens Docker images, PG-backed checkpoints (no shared filesystem needed), `/healthz` + `/readyz` + `/metrics` HTTP endpoints, graceful SIGTERM drain |
@@ -56,12 +56,12 @@ Not in scope: model training (that's the safety-classifier and other repos),
   share a transactional boundary; we settle for **effective once-per-row in
   ClickHouse** via insert deduplication. See [S9](#9-data-correctness-guarantees).
 - **A guardrail / blocking layer.** The Safety lens emits *observability*
-  signals (PII counts, toxicity labels). It does not block requests. The
-  application layer decides what to do with the signals.
+  compass (PII counts, toxicity labels). It does not block requests. The
+  application layer decides what to do with the compass.
 - **Multi-tenant isolation at the worker level.** Tenants share the same
   worker process; isolation is enforced at the data model (every row carries
   `solution_id`).
-- **A general-purpose stream processor.** This is purpose-built for the Signal
+- **A general-purpose stream processor.** This is purpose-built for the Compass
   schema. Not a Flink/Spark replacement.
 
 ---
@@ -78,7 +78,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
    ┌──────────────────────────────────────┐
    │  ClickHouse                          │
    │  ┌────────────────────────────────┐  │
-   │  │ signal_raw_spans (MergeTree)   │  │
+   │  │ compass_raw_spans (MergeTree)   │  │
    │  └────────────────────────────────┘  │       Postgres
    └──────────────┬───────────────────────┘  ┌─────────────────────────────┐
                   │ poll (recorded_at > wm)  │ solutions / endpoints /     │
@@ -91,20 +91,20 @@ Not in scope: model training (that's the safety-classifier and other repos),
    │  │ for spec in lens.SPECS:        │  │           ▲
    │  │   if applies and gated:        │  │           │ read thresholds (TTL cached)
    │  │     row = pattern(span, ctx)   │  │           │ read pricing (Cost)
-   │  └────────────────────────────────┘  │           │ UPSERT watermark
+   │  └────────────────────────────────┘  │           │ UPSERT checkpoint
    └──────────────┬───────────────────────┘           │
                   │ INSERT (with dedup token)         │
                   ▼                                   │
    ┌──────────────────────────────────────┐           │
    │  ClickHouse                          │           │
    │  ┌────────────────────────────────┐  │           │
-   │  │ signal_derived_metrics         │  │           │
+   │  │ compass_derived_metrics         │  │           │
    │  │ + dedup window = 1000          │  │           │
    │  └─────────────┬──────────────────┘  │           │
    │                │ MV fires on insert  │           │
    │                ▼                     │           │
    │  ┌────────────────────────────────┐  │           │
-   │  │ signal_aggregated_metrics      │  │           │
+   │  │ compass_aggregated_metrics      │  │           │
    │  │ (1-min buckets, AggregatingMT) │  │           │
    │  └────────────────────────────────┘  │           │
    └──────────────────────────────────────┘           │
@@ -119,7 +119,7 @@ Not in scope: model training (that's the safety-classifier and other repos),
 
 The workers sit between ClickHouse-as-truth (spans in) and ClickHouse-as-rollup
 (metrics out). Postgres exists alongside as the "what should be" store —
-registry, configured thresholds, prices, and worker high-watermarks.
+registry, configured thresholds, prices, and worker high-checkpoints.
 
 ---
 
@@ -130,11 +130,11 @@ the **operational store** — everything that exists or should be.
 
 | Postgres (alongside) | ClickHouse (this pipeline) |
 |---|---|
-| What entities exist (`solutions`, `endpoints`, `workflows`, `agents`, `components`) | What happened (`signal_raw_spans`) |
-| What's wired to what (`bindings`) | What was measured (`signal_derived_metrics`) |
-| What the limits are (`*_thresholds`) | Pre-aggregated time series (`signal_aggregated_metrics`) |
+| What entities exist (`solutions`, `endpoints`, `workflows`, `agents`, `components`) | What happened (`compass_raw_spans`) |
+| What's wired to what (`bindings`) | What was measured (`compass_derived_metrics`) |
+| What the limits are (`*_thresholds`) | Pre-aggregated time series (`compass_aggregated_metrics`) |
 | Component pricing (`components.pricing` JSONB) | |
-| Worker watermarks (`worker_checkpoints`) | |
+| Worker checkpoints (`worker_checkpoints`) | |
 
 ### The materialized-path convention
 
@@ -151,7 +151,7 @@ Rule: **the deepest non-empty id is the target; higher levels are context.**
 This applies to:
 - `bindings` in Postgres ("in this context this asset runs with this config" — deepest non-NULL FK = the target)
 - `*_thresholds` in Postgres (the path defines what entity the alert applies to)
-- `signal_derived_metrics` / `signal_aggregated_metrics` scope columns
+- `compass_derived_metrics` / `compass_aggregated_metrics` scope columns
 
 One enforcement function, `path_cols(span, scope)`, blanks the ids deeper than
 the scope:
@@ -171,7 +171,7 @@ model.
 
 ## 4. ClickHouse schema deep-dive
 
-### 4.1 `signal_raw_spans` — "what happened"
+### 4.1 `compass_raw_spans` — "what happened"
 
 - **Engine**: `MergeTree`
 - **Partition**: `toYYYYMM(started_at)` (monthly)
@@ -194,7 +194,7 @@ span_type IN (...)` push into the primary-key index. The Cost lens has
 `span_types = ("model_call", "embedding", "tool_call", "retrieval")` and never
 reads the other 7 span types. The Safety lens does `span_types = ("model_call",)`.
 
-### 4.2 `signal_derived_metrics` — "what was measured"
+### 4.2 `compass_derived_metrics` — "what was measured"
 
 - **Engine**: `MergeTree`
 - **Partition**: `toYYYYMMDD(ts)` (daily)
@@ -227,7 +227,7 @@ Daily partitions match the worker's write cadence (continuous, but TTL/cleanup
 operates daily). Monthly would make per-day queries scan too much; hourly would
 explode the number of parts on a busy cluster.
 
-### 4.3 `signal_aggregated_metrics` — "the pre-rolled time series"
+### 4.3 `compass_aggregated_metrics` — "the pre-rolled time series"
 
 - **Engine**: `AggregatingMergeTree`
 - **Partition**: `toYYYYMM(ts)` (monthly)
@@ -258,16 +258,16 @@ API enforces this; ad-hoc queries get a surprise.
 ### 4.4 The aggregation layer — one MV, one base grain
 
 There is exactly **one** materialized view, `mv_agg_base`, at a **1-minute**
-base grain. It fires on every insert into `signal_derived_metrics`:
+base grain. It fires on every insert into `compass_derived_metrics`:
 
 ```
-INSERT into signal_derived_metrics
+INSERT into compass_derived_metrics
         │
         ▼
    mv_agg_base   ── groups by (entity path, scope, metric, 1-min bucket)
         │           and writes count/sum/min/max + avgState + quantilesTDigestState
         ▼
-signal_aggregated_metrics   (one row per entity × metric × minute)
+compass_aggregated_metrics   (one row per entity × metric × minute)
 ```
 
 Coarser windows (5m, 1h, 1d) are **not separate tables or views** — they're
@@ -278,7 +278,7 @@ produced by merging base-grain buckets at read time:
 SELECT toStartOfHour(ts) AS hour,
        avgMerge(avg_value),
        quantilesTDigestMerge(0.95)(quantiles)
-FROM signal_aggregated_metrics
+FROM compass_aggregated_metrics
 WHERE metric = 'latency' AND solution_id = 'sol_support'
 GROUP BY hour;
 ```
@@ -337,7 +337,7 @@ One row per `(lens, partition_key)`. UPSERT'd by every worker batch.
 CREATE TABLE worker_checkpoints (
     lens          TEXT        NOT NULL,
     partition_key TEXT        NOT NULL DEFAULT 'default',
-    watermark     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
+    checkpoint     TEXT        NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS.mmm'
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by    TEXT,                          -- pod hostname (diagnostic)
     PRIMARY KEY (lens, partition_key)
@@ -376,7 +376,7 @@ Worth it for the orders-of-magnitude perf difference on the analytical side.
 The package is deliberately split into a **shared engine** and **thin lenses**:
 
 ```
-signal_worker/
+compass_worker/
   base.py          ENGINE  — run loop, CH I/O, checkpoint, CSV path
   spec.py          ENGINE  — MetricSpec + SpecWorker (build-context → walk-specs → emit)
   checkpoint.py    ENGINE  — Postgres-backed checkpoint store
@@ -486,7 +486,7 @@ or the toxicity classifier ever sees them.
 Both stages consult the same `ToggleCache` — a PG-backed set of active
 `(scope, solution_id, endpoint, workflow_id, agent_id, component_id, metric)`
 tuples, refreshed on a TTL. Reads are O(1) (set membership). The cache
-self-refreshes from Postgres `*_thresholds` rows every `SIGNAL_TOGGLE_TTL`
+self-refreshes from Postgres `*_thresholds` rows every `COMPASS_TOGGLE_TTL`
 seconds (default 300).
 
 ### 6.5 The PrefillStep pipeline (expensive batch analyses)
@@ -537,7 +537,7 @@ to `endpoint` so endpoint-scoped dashboards have data.
 run_poll():
   set_ready(True)
   loop:
-    wm    = load_checkpoint()                       # PG: SELECT watermark FROM worker_checkpoints
+    wm    = load_checkpoint()                       # PG: SELECT checkpoint FROM worker_checkpoints
     spans = fetch_batch(since=wm, limit=batch)      # CH: recorded_at > wm ORDER BY recorded_at LIMIT N
     if not spans:
       sleep(poll_sec); continue
@@ -571,16 +571,16 @@ class PostgresCheckpointStore:
     PARTITION_KEY = "default"   # always 'default' until partitioned consumption lands
 
     def load(self, lens: str) -> str:
-        # SELECT watermark FROM worker_checkpoints WHERE lens=%s AND partition_key=%s
+        # SELECT checkpoint FROM worker_checkpoints WHERE lens=%s AND partition_key=%s
         # Returns '1970-01-01 00:00:00.000' if no row yet.
 
-    def save(self, lens: str, watermark: str) -> None:
-        # INSERT ... ON CONFLICT DO UPDATE SET watermark=..., updated_at=now(), updated_by=...
+    def save(self, lens: str, checkpoint: str) -> None:
+        # INSERT ... ON CONFLICT DO UPDATE SET checkpoint=..., updated_at=now(), updated_by=...
 ```
 
 Connection is opened lazily, autocommit, held for the worker's lifetime. Each
 save is one UPSERT. Save failures propagate out — the run loop dies, K8s
-restarts the pod, and `load()` returns the last successfully-saved watermark.
+restarts the pod, and `load()` returns the last successfully-saved checkpoint.
 The dedup token then prevents double-write on re-fetch (see S9.2).
 
 ---
@@ -625,7 +625,7 @@ into the fetch query so non-billable spans never enter the worker.
 - Add tool/embedding/retrieval flat fees
 - Compute waste (failed calls, retried calls) for the wasted_cost metric
 
-Pricing cache refreshes from Postgres every `SIGNAL_PRICING_TTL` seconds. Stale
+Pricing cache refreshes from Postgres every `COMPASS_PRICING_TTL` seconds. Stale
 pricing means a window of metrics computed against old rates; we'd rather show
 yesterday's prices than block the worker.
 
@@ -711,13 +711,13 @@ share the same kept-spans list.
 
 ### 7.4 Adding a new lens
 
-1. Create `signal_worker/lenses/<name>.py` with a `SpecWorker` subclass:
+1. Create `compass_worker/lenses/<name>.py` with a `SpecWorker` subclass:
    - Set `lens` (string), a `SPECS` list of `MetricSpec`, optionally `span_types`.
    - Implement `build_context(span)` to parse everything specs need, once.
 2. Register it in `run_worker.py`'s `LENSES` dict.
 3. Add a `Dockerfile.<name>` if it needs its own image:
    ```dockerfile
-   FROM signal-worker:base
+   FROM compass-worker:base
    ENTRYPOINT ["python", "run_worker.py", "--worker", "<name>"]
    ```
 4. Add a row to `infra/postgres/init/02_thresholds.sql` and the lens-specific
@@ -737,7 +737,7 @@ of `build_context`).
                         python:3.11-slim
                                │
                                ▼
-                  signal-worker:base  (~400 MB, internal — not deployed)
+                  compass-worker:base  (~400 MB, internal — not deployed)
                     │           │           │
         ┌───────────┘           │           └───────────┐
         ▼                       ▼                       ▼
@@ -751,7 +751,7 @@ of `build_context`).
 ```
 
 `:base` is a pure framework image: Python venv, CH/PG client libs, pydantic,
-and the `signal_worker` package source. It is not deployed directly — only the
+and the `compass_worker` package source. It is not deployed directly — only the
 three child images are.
 
 `:performance` and `:cost` differ from `:base` only by the `ENTRYPOINT` —
@@ -794,13 +794,13 @@ to (B). The Dockerfile change is small.
 ### 8.3 K8s topology
 
 ```
-Namespace: signal
-  ConfigMap  signal-worker-config       (non-secret env: CH_HOST, PG host, toxicity thresholds, …)
-  Secret     signal-worker-secrets      (PG_DSN, CH_PASSWORD)
-  Deployment signal-worker-performance  image=:performance, replicas=1
-  Deployment signal-worker-cost         image=:cost,        replicas=1
-  Deployment signal-worker-safety       image=:safety,      replicas=1
-  Service    signal-worker-metrics      port=8080, selects all worker pods, for Prometheus
+Namespace: compass
+  ConfigMap  compass-worker-config       (non-secret env: CH_HOST, PG host, toxicity thresholds, …)
+  Secret     compass-worker-secrets      (PG_DSN, CH_PASSWORD)
+  Deployment compass-worker-performance  image=:performance, replicas=1
+  Deployment compass-worker-cost         image=:cost,        replicas=1
+  Deployment compass-worker-safety       image=:safety,      replicas=1
+  Service    compass-worker-metrics      port=8080, selects all worker pods, for Prometheus
 ```
 
 Per Deployment:
@@ -820,10 +820,10 @@ The Service is purely for Prometheus discovery; workers don't serve traffic.
 For GCP Artifact Registry (the production target):
 
 ```
-REGION-docker.pkg.dev/PROJECT/signal/signal-worker:base-v<version>
-REGION-docker.pkg.dev/PROJECT/signal/signal-worker:performance-v<version>
-REGION-docker.pkg.dev/PROJECT/signal/signal-worker:cost-v<version>
-REGION-docker.pkg.dev/PROJECT/signal/signal-worker:safety-v<version>
+REGION-docker.pkg.dev/PROJECT/compass/compass-worker:base-v<version>
+REGION-docker.pkg.dev/PROJECT/compass/compass-worker:performance-v<version>
+REGION-docker.pkg.dev/PROJECT/compass/compass-worker:cost-v<version>
+REGION-docker.pkg.dev/PROJECT/compass/compass-worker:safety-v<version>
 ```
 
 The `:base` image is pushed even though it's not deployed directly — child
@@ -844,8 +844,8 @@ what we don't.
 
 ### 9.1 Append-only writes
 
-Workers only `INSERT` into `signal_derived_metrics`. They never UPDATE or
-DELETE. They never write to `signal_aggregated_metrics` directly — the MV
+Workers only `INSERT` into `compass_derived_metrics`. They never UPDATE or
+DELETE. They never write to `compass_aggregated_metrics` directly — the MV
 does that.
 
 This is enforced by code structure (the only insert in the worker is the
@@ -882,7 +882,7 @@ rewinds, use the manual cleanup pattern in `infra/README.md` S "Reset and re-ini
 ### 9.3 Per-lens isolation
 
 Each lens has:
-- Its own checkpoint row in `worker_checkpoints` (independent watermark).
+- Its own checkpoint row in `worker_checkpoints` (independent checkpoint).
 - Its own Deployment (independent failure domain).
 - Its own image (independent dependency set).
 - Its own toggle cache (different thresholds).
@@ -895,7 +895,7 @@ back without touching the other lenses.
 
 | Property | Guarantee |
 |---|---|
-| Exactly-once across CH and PG | ❌ — no shared transaction. Token gives effective once-per-row in CH; PG watermark can technically lag. |
+| Exactly-once across CH and PG | ❌ — no shared transaction. Token gives effective once-per-row in CH; PG checkpoint can technically lag. |
 | Strict ordering within a lens | ❌ — each batch is processed atomically, but inter-batch ordering depends on `ORDER BY recorded_at LIMIT N` and the dedup window |
 | Span-boundary ties | ❌ — `recorded_at > wm LIMIT N` can skip rows that share the boundary timestamp if a tie spans the batch edge. Mitigated by `WORKER_BATCH = 5000`; a robust fix is `(recorded_at, span_id)` cursor pagination, deferred |
 | Multi-pod fan-out for same lens | ❌ — both pods fetch the same spans, wasting compute; the dedup token prevents data corruption but not the waste. Need partitioned consumption (S11.4) |
@@ -921,21 +921,21 @@ All labeled by `lens`:
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `signal_worker_batches_total{lens,result}` | counter | result ∈ `success | error | empty` |
-| `signal_worker_spans_processed_total{lens}` | counter | spans fetched |
-| `signal_worker_rows_emitted_total{lens}` | counter | derived rows written |
-| `signal_worker_skipped_at_gate_total{lens}` | counter | spans dropped at Stage 1 |
-| `signal_worker_batch_duration_seconds{lens}` | histogram | process_batch wall-clock |
-| `signal_worker_write_duration_seconds{lens}` | histogram | CH insert wall-clock |
-| `signal_worker_checkpoint_lag_seconds{lens}` | gauge | now − last span's recorded_at |
+| `compass_worker_batches_total{lens,result}` | counter | result ∈ `success | error | empty` |
+| `compass_worker_spans_processed_total{lens}` | counter | spans fetched |
+| `compass_worker_rows_emitted_total{lens}` | counter | derived rows written |
+| `compass_worker_skipped_at_gate_total{lens}` | counter | spans dropped at Stage 1 |
+| `compass_worker_batch_duration_seconds{lens}` | histogram | process_batch wall-clock |
+| `compass_worker_write_duration_seconds{lens}` | histogram | CH insert wall-clock |
+| `compass_worker_checkpoint_lag_seconds{lens}` | gauge | now − last span's recorded_at |
 
 ### 10.3 Why these specifically
 
 Five questions an operator needs to answer:
 
-1. **Is it running?** → `/healthz` + `signal_worker_batches_total{result="success"}` rate.
-2. **Is it keeping up?** → `signal_worker_checkpoint_lag_seconds` is the primary scaling input.
-3. **Is it healthy?** → `signal_worker_batches_total{result="error"}` rate.
+1. **Is it running?** → `/healthz` + `compass_worker_batches_total{result="success"}` rate.
+2. **Is it keeping up?** → `compass_worker_checkpoint_lag_seconds` is the primary scaling input.
+3. **Is it healthy?** → `compass_worker_batches_total{result="error"}` rate.
 4. **What's it doing?** → `spans_processed`, `rows_emitted`, `skipped_at_gate`.
 5. **Is it fast enough?** → `batch_duration_seconds` p95.
 
