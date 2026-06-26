@@ -6,6 +6,7 @@ Single lens (the production default — one process per lens, see ARCHITECTURE.m
     python run_worker.py --worker performance
     python run_worker.py --worker performance --once
     python run_worker.py --worker safety
+    python run_worker.py --worker reconciler
 
 All lenses in one process (dev convenience — coupled lifecycle):
 
@@ -28,6 +29,7 @@ from compass_worker.lenses.cost import CostWorker
 from compass_worker.lenses.performance import PerformanceWorker
 from compass_worker.lenses.safety import SafetyWorker
 from compass_worker.lenses.quality import QualityWorker
+from compass_worker.reconciler import ReconcilerWorker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +44,7 @@ LENSES = {
     "cost":        CostWorker,
     "safety":      SafetyWorker,
     "quality":     QualityWorker,
+    "reconciler":  ReconcilerWorker,
 }
 
 
@@ -113,24 +116,29 @@ def parse_args() -> argparse.Namespace:
 def show_specs(lens: str, cfg: Config) -> None:
     w = LENSES[lens](cfg)
 
+    # Workers without a SPECS list (e.g. reconciler) — short note instead of
+    # an empty table.
+    specs = getattr(w, "specs", None) or []
+    if not specs:
+        print(f"# {lens} worker — no SPECS (non-metric worker)")
+        return
+
     print(
-        f"# {lens} lens — {len(w.specs)} specs "
-        f"({sum(s.per_span for s in w.specs)} per-span, "
-        f"{sum(not s.per_span for s in w.specs)} read-time)\n"
+        f"# {lens} lens — {len(specs)} specs "
+        f"({sum(s.per_span for s in specs)} per-span, "
+        f"{sum(not s.per_span for s in specs)} read-time)\n"
     )
 
     hdr = (
         f"{'metric':24} {'applies':14} {'pattern':22} "
         f"{'unit':8} {'win':5} {'thr':3} {'per_span':8}"
     )
-
     print(hdr)
     print("-" * len(hdr))
 
-    for s in w.specs:
+    for s in specs:
         pat = getattr(s.pattern, "__qualname__", "")
         pat = pat.split(".")[0] if pat else type(s.pattern).__name__
-
         print(
             f"{s.metric:24} {s.applies.__name__:14} "
             f"{pat:22} {s.unit:8} {s.window:5} "

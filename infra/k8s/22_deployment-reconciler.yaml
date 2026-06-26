@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compass-worker-reconciler
+  namespace: compass
+  labels:
+    app: compass-worker
+    lens: reconciler
+spec:
+  # SINGLE replica. The reconciler must not run concurrently — its
+  # registry UPSERTs and threshold seeds are idempotent but running two
+  # of them risks duplicate work and adds no throughput (the work is
+  # PG-bound, not CPU-bound).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compass-worker
+      lens: reconciler
+  strategy:
+    # Recreate, not RollingUpdate — guarantees only one reconciler exists
+    # at any moment. The work is tiny so the few-second gap during rollout
+    # is fine.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: compass-worker
+        lens: reconciler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: worker
+        image: compass-worker:reconciler
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef: { name: compass-worker-config }
+        - secretRef:    { name: compass-worker-secrets }
+        ports:
+        - name: metrics
+          containerPort: 8080
+        livenessProbe:
+          httpGet:  { path: /healthz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:  { path: /readyz, port: 8080 }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          # Light: PG INSERTs, no ML, no aggregation. Same envelope as Cost
+          # except half the limits.
+          requests: { cpu: "100m", memory: "256Mi" }
+          limits:   { cpu: "500m", memory: "512Mi" }
