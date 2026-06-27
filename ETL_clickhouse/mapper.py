@@ -1,0 +1,183 @@
+"""Column mapping: otel_traces → compass_raw_spans.
+
+OTel spans carry a generic structure (SpanKind, SpanAttributes map, etc.).
+Compass raw spans expect a richer, opinionated schema with dedicated columns
+for solution_id, workflow_id, scope, etc.
+
+Mapping priority for every Compass column:
+  1. Explicit SpanAttribute with the 'compass.' namespace  (e.g. compass.scope)
+  2. Plain SpanAttribute with the bare name               (e.g. scope)
+  3. Heuristic derived from OTel fields                   (e.g. SpanKind → span_type)
+  4. Empty string / None
+
+Attributes consumed into dedicated columns are NOT repeated in the metadata blob.
+Everything else from SpanAttributes lands in metadata as a JSON string.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone, timedelta
+
+# OTel SpanKind → Compass span_type (used only when no explicit attribute present)
+SPAN_KIND_TO_TYPE: dict[str, str] = {
+    "SERVER":   "solution",
+    "CLIENT":   "model_call",
+    "INTERNAL": "workflow",
+    "PRODUCER": "workflow",
+    "CONSUMER": "agent",
+}
+
+# OTel StatusCode → Compass span_status
+STATUS_CODE_MAP: dict[str, str] = {
+    "OK":    "ok",
+    "ERROR": "error",
+    "UNSET": "ok",
+    "":      "ok",
+}
+
+# Column order must match the compass_raw_spans DDL exactly.
+# partition_id is MATERIALIZED (computed by CH from trace_id) — omit from inserts.
+RAW_COLS: list[str] = [
+    "trace_id", "span_id", "parent_span_id", "correlation_id", "session_id",
+    "span_type", "span_name", "span_status", "scope", "solution_id", "endpoint",
+    "workflow_id", "agent_id", "component_id", "component_type",
+    "started_at", "ended_at", "pipeline_stage", "stage_order", "entity_type",
+    "service", "environment", "region", "metadata", "recorded_at",
+]
+
+# SpanAttribute keys that are lifted into dedicated columns.
+# These are excluded from the metadata blob to avoid duplication.
+_DEDICATED_KEYS: frozenset[str] = frozenset({
+    "correlation_id", "session_id", "span_type", "scope",
+    "solution_id", "endpoint", "workflow_id", "agent_id",
+    "component_id", "component_type", "pipeline_stage", "stage_order",
+    "entity_type", "environment", "region",
+    # compass-namespaced variants from instrumented SDKs
+    "compass.correlation_id", "compass.session_id", "compass.span_type",
+    "compass.scope", "compass.solution_id", "compass.endpoint",
+    "compass.workflow_id", "compass.agent_id", "compass.component_id",
+    "compass.component_type", "compass.pipeline_stage", "compass.stage_order",
+    "compass.entity_type",
+})
+
+
+def _pick(attrs: dict, *keys: str, default: str = "") -> str:
+    """Return the first non-empty value found under any of keys, else default."""
+    for k in keys:
+        v = attrs.get(k)
+        if v:
+            return str(v)
+    return default
+
+
+def map_span(row: dict) -> dict:
+    """Transform one otel_traces row into a compass_raw_spans row dict.
+
+    Args:
+        row: Column-name → value dict as returned by clickhouse-connect.
+             Timestamp is a datetime object; Duration is an int (nanoseconds);
+             SpanAttributes / ResourceAttributes are Python dicts.
+
+    Returns:
+        Dict keyed by RAW_COLS, ready for insertion into compass_raw_spans.
+    """
+    attrs: dict    = row.get("SpanAttributes")    or {}
+    resource: dict = row.get("ResourceAttributes") or {}
+
+    # ── Timestamps ────────────────────────────────────────────────────────────
+    # clickhouse-connect returns DateTime64 columns as Python datetime objects.
+    started_at: datetime = row["Timestamp"]
+    duration_ns: int = row.get("Duration") or 0
+    ended_at: datetime = started_at + timedelta(microseconds=duration_ns / 1_000)
+
+    # ── span_type ─────────────────────────────────────────────────────────────
+    span_type = (
+        _pick(attrs, "compass.span_type", "span_type")
+        or SPAN_KIND_TO_TYPE.get((row.get("SpanKind") or "").upper(), "workflow")
+    )
+
+    # ── span_status ───────────────────────────────────────────────────────────
+    span_status = STATUS_CODE_MAP.get(
+        (row.get("StatusCode") or "").upper(), "ok"
+    )
+
+    # ── scope ─────────────────────────────────────────────────────────────────
+    # Fall back to 'solution' for root spans (no parent), 'component' otherwise.
+    scope = _pick(attrs, "compass.scope", "scope") or (
+        "solution" if not (row.get("ParentSpanId") or "").strip() else "component"
+    )
+
+    # ── solution_id ───────────────────────────────────────────────────────────
+    solution_id = (
+        _pick(attrs, "compass.solution_id", "solution_id")
+        or (row.get("ServiceName") or "")
+    )
+
+    # ── environment ───────────────────────────────────────────────────────────
+    environment = (
+        _pick(attrs, "compass.environment", "environment")
+        or resource.get("deployment.environment", "")
+    )
+
+    # ── region ────────────────────────────────────────────────────────────────
+    region = (
+        _pick(attrs, "region")
+        or resource.get("cloud.region", "")
+        or resource.get("cloud.availability_zone", "")
+    )
+
+    # ── stage_order ───────────────────────────────────────────────────────────
+    stage_order_raw = _pick(attrs, "compass.stage_order", "stage_order")
+    try:
+        stage_order = int(stage_order_raw) if stage_order_raw else None
+    except (ValueError, TypeError):
+        stage_order = None
+
+    # ── metadata ──────────────────────────────────────────────────────────────
+    # All SpanAttributes not consumed into dedicated columns + StatusMessage + events.
+    meta: dict = {k: v for k, v in attrs.items() if k not in _DEDICATED_KEYS}
+
+    if row.get("StatusMessage"):
+        meta["status_message"] = row["StatusMessage"]
+
+    # Events — stored as parallel arrays (Nested type from ClickHouse).
+    ev_timestamps = row.get("Events.Timestamp") or []
+    ev_names      = row.get("Events.Name")      or []
+    ev_attrs_list = row.get("Events.Attributes") or []
+    if ev_names:
+        meta["events"] = [
+            {
+                "timestamp": t.isoformat() if hasattr(t, "isoformat") else str(t),
+                "name":       n,
+                "attributes": a,
+            }
+            for t, n, a in zip(ev_timestamps, ev_names, ev_attrs_list)
+        ]
+
+    return {
+        "trace_id":       row.get("TraceId")      or "",
+        "span_id":        row.get("SpanId")        or "",
+        "parent_span_id": row.get("ParentSpanId")  or "",
+        "correlation_id": _pick(attrs, "compass.correlation_id", "correlation_id"),
+        "session_id":     _pick(attrs, "compass.session_id",     "session_id"),
+        "span_type":      span_type,
+        "span_name":      row.get("SpanName") or "",
+        "span_status":    span_status,
+        "scope":          scope,
+        "solution_id":    solution_id,
+        "endpoint":       _pick(attrs, "compass.endpoint",       "endpoint"),
+        "workflow_id":    _pick(attrs, "compass.workflow_id",    "workflow_id"),
+        "agent_id":       _pick(attrs, "compass.agent_id",       "agent_id"),
+        "component_id":   _pick(attrs, "compass.component_id",   "component_id"),
+        "component_type": _pick(attrs, "compass.component_type", "component_type"),
+        "started_at":     started_at,
+        "ended_at":       ended_at,
+        "pipeline_stage": _pick(attrs, "compass.pipeline_stage", "pipeline_stage"),
+        "stage_order":    stage_order,
+        "entity_type":    _pick(attrs, "compass.entity_type",    "entity_type"),
+        "service":        row.get("ServiceName") or "",
+        "environment":    environment,
+        "region":         region,
+        "metadata":       json.dumps(meta) if meta else "",
+        "recorded_at":    datetime.now(timezone.utc),
+    }
