@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.7
+#
+# compass-worker:reconciler — auto-discovery + auto-seed worker for coverage.
+# Identical content to :base; only the default ENTRYPOINT differs.
+#
+# Build (after building :base):
+#   docker build -f compass-workers/Dockerfile.reconciler -t compass-worker:reconciler .
+
+FROM compass-worker:base
+ENTRYPOINT ["python", "run_worker.py", "--worker", "reconciler"]

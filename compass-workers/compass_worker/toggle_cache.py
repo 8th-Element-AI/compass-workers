@@ -86,6 +86,11 @@ class ToggleCache:
         self.ttl = ttl
         self.disabled = disabled
         self._set: Set[ToggleKey] = set()
+        # Sentinel: 0.0 = never loaded. Anything > 0 = loaded at that wall time,
+        # even if the load returned an empty set. DO NOT use `self._set` truthiness
+        # to detect "loaded" — an empty set is falsy in Python, which would
+        # collapse "loaded but no active rows" into "never loaded" and trigger
+        # a PG round-trip on every gate check.
         self._loaded_at = 0.0
         self._refresh_lock = threading.Lock()
 
@@ -144,12 +149,13 @@ class ToggleCache:
 
     def _refresh(self, force: bool = False) -> None:
         now = time.time()
-        # Fast path — already loaded recently
-        if not force and self._set and (now - self._loaded_at) <= self.ttl:
+        # Fast path — loaded at least once AND within TTL. Uses _loaded_at
+        # (not _set truthiness) so an empty result set still counts as loaded.
+        if not force and self._loaded_at > 0.0 and (now - self._loaded_at) <= self.ttl:
             return
         with self._refresh_lock:
-            # Re-check after acquiring lock — another thread may have just done it
-            if not force and self._set and (time.time() - self._loaded_at) <= self.ttl:
+            # Re-check after acquiring lock — another thread may have just done it.
+            if not force and self._loaded_at > 0.0 and (time.time() - self._loaded_at) <= self.ttl:
                 return
             try:
                 new_set = self._load_from_pg()
@@ -160,8 +166,11 @@ class ToggleCache:
                     self.category, len(new_set),
                 )
             except Exception as e:
-                if not self._set:
-                    raise                                  # never loaded — surface
+                # Never loaded — surface the error so callers know the cache
+                # is unusable. Once loaded once, briefly unreachable PG means
+                # we serve the stale snapshot and just log.
+                if self._loaded_at == 0.0:
+                    raise
                 log.warning(
                     "[toggles:%s] refresh failed; serving stale snapshot: %s",
                     self.category, e,

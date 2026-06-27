@@ -22,7 +22,9 @@ RUN pip install --no-cache-dir \
         "psycopg[binary]>=3.1" \
         "python-dotenv>=1.0" \
         "pydantic_settings" \
-        "prometheus_client>=0.20"
+        "prometheus_client>=0.20" \
+        "clickhouse_connect" \
+        "psycopg"
 
 WORKDIR /app
 COPY compass-workers/compass_worker /app/compass_worker

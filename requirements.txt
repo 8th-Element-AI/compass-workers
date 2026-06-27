@@ -20,6 +20,8 @@ python-dotenv>=1.0
 
 pydantic_settings
 
+psycopg
+
 # PII detection module (Presidio-backed) — required by the Safety lens.
 # Editable install from the sibling PII/ directory. Pulls in its own deps
 # (presidio-analyzer, presidio-anonymizer, spacy, faker, pyyaml).
