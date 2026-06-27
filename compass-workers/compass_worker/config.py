@@ -52,11 +52,13 @@ class Config(BaseSettings):
     batch_size_cost:        int | None = Field(default=None, alias="WORKER_BATCH_COST")
     batch_size_safety:      int | None = Field(default=None, alias="WORKER_BATCH_SAFETY")
     batch_size_quality:     int | None = Field(default=None, alias="WORKER_BATCH_QUALITY")
+    batch_size_reconciler:  int | None = Field(default=None, alias="WORKER_BATCH_RECONCILER")
  
     poll_sec_performance: float | None = Field(default=None, alias="WORKER_POLL_SEC_PERFORMANCE")
     poll_sec_cost:        float | None = Field(default=None, alias="WORKER_POLL_SEC_COST")
     poll_sec_safety:      float | None = Field(default=None, alias="WORKER_POLL_SEC_SAFETY")
     poll_sec_quality:     float | None = Field(default=None, alias="WORKER_POLL_SEC_QUALITY")
+    poll_sec_reconciler:  float | None = Field(default=None, alias="WORKER_POLL_SEC_RECONCILER")
 
     # ─── Horizontal scaling (Phase 4.3) ──────────────────────────────
     worker_partition_index: int = Field(
