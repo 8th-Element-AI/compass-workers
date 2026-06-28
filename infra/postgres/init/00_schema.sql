@@ -31,7 +31,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS solutions (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    solution_id   VARCHAR(64)  UNIQUE NOT NULL,
+    solution_id   VARCHAR(255)  UNIQUE NOT NULL,
     solution_name VARCHAR(255) NOT NULL,
     description   TEXT,
     is_active     BOOLEAN     NOT NULL DEFAULT true,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS solutions (
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS endpoints (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    endpoint_id     VARCHAR(64)  UNIQUE NOT NULL,
+    endpoint_id     VARCHAR(255)  UNIQUE NOT NULL,
     solution_id     UUID NOT NULL REFERENCES solutions(id),
     endpoint_name   VARCHAR(255) NOT NULL,
     path            VARCHAR(255),
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_endpoints_solution ON endpoints (solution_id);
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflows (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    workflow_id      VARCHAR(64)  UNIQUE NOT NULL,
+    workflow_id      VARCHAR(255)  UNIQUE NOT NULL,
     workflow_name    VARCHAR(255) NOT NULL,
     workflow_version VARCHAR(32),
     description      TEXT,
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS workflows (
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agents (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id    VARCHAR(64)  UNIQUE NOT NULL,
+    agent_id    VARCHAR(255)  UNIQUE NOT NULL,
     agent_name  VARCHAR(255) NOT NULL,
     description TEXT,
     is_active   BOOLEAN     NOT NULL DEFAULT true,
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS agents (
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS components (
     id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    component_id   VARCHAR(128) UNIQUE NOT NULL,
+    component_id   VARCHAR(255) UNIQUE NOT NULL,
     component_type component_type_enum NOT NULL,
     component_name VARCHAR(255) NOT NULL,
     provider       VARCHAR(64),

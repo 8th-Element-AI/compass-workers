@@ -175,7 +175,14 @@ def main() -> int:
     # Start the observability server BEFORE building workers, so /healthz
     # responds even during slow worker initialization (model loads, etc.).
     from compass_worker.observability import start_server
-    start_server(port=cfg.observability_port)
+    try:
+        start_server(port=cfg.observability_port)
+    except OSError as e:
+        logger.warning(
+            "[obs] could not bind observability server on port %d (%s) — "
+            "worker will run without /healthz /metrics",
+            cfg.observability_port, e,
+        )
 
     args = parse_args()
 
