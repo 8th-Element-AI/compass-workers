@@ -1,0 +1,23 @@
+flowchart LR
+    subgraph CH["ClickHouse - measurements"]
+        AGG["compass_aggregated_metrics<br/>observed value over a window"]
+    end
+
+    subgraph PG1["Postgres - rules + meaning"]
+        TH["thresholds<br/>operator, warning, critical, window"]
+        REG["registry + bindings<br/>entity names, path, pricing"]
+    end
+
+    ENG{{"Insights Engine<br/>(reader / evaluator)"}}
+
+    subgraph PG2["Postgres - new output"]
+        INS["insights"]
+        INC["incidents"]
+    end
+
+    AGG -- "the number (4100ms)" --> ENG
+    TH  -- "the rule (gt 3600 crit)" --> ENG
+    REG -- "the context + path" --> ENG
+    ENG -- "value crosses rule" --> INS
+    INS -- "correlate by path + time" --> INC
+    INC -. "confidence score" .-> INC

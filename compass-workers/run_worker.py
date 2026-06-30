@@ -30,6 +30,7 @@ from compass_worker.lenses.performance import PerformanceWorker
 from compass_worker.lenses.safety import SafetyWorker
 from compass_worker.lenses.quality import QualityWorker
 from compass_worker.reconciler import ReconcilerWorker
+from compass_worker.insights import InsightsWorker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +46,7 @@ LENSES = {
     "safety":      SafetyWorker,
     "quality":     QualityWorker,
     "reconciler":  ReconcilerWorker,
+    "insights":    InsightsWorker,
 }
 
 

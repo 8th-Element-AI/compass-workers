@@ -1,0 +1,35 @@
+flowchart LR
+    SPANS["Agent / app traces<br/>(spans)"] --> CH_RAW
+
+    subgraph CH["ClickHouse - time-series"]
+        CH_RAW["raw_spans"] --> CH_DER["derived_metrics"]
+        CH_DER -->|"materialized view"| CH_AGG["aggregated_metrics"]
+    end
+
+    subgraph WORKERS["Lens workers (5 lenses)"]
+        L["performance - cost - safety<br/>quality - outcomes"]
+    end
+
+    subgraph PG["Postgres - config + state"]
+        REG["registry + bindings<br/>(read-time: names, pricing)"]
+        TH["thresholds<br/>(rules: warn / crit)"]
+    end
+
+    CH_RAW --> L
+    L --> CH_DER
+    TH -.->|"gates which<br/>metrics compute"| L
+
+    subgraph IE["Insights Engine (separate worker, ~30-60s tick)"]
+        ENG{{"detect -> classify -> correlate<br/>-> reconcile -> persist"}}
+    end
+
+    CH_AGG -->|"observed values + 7d baseline"| ENG
+    TH -->|"rules"| ENG
+
+    subgraph OUT["Postgres - insights store"]
+        INS["insights"] --> INC["incidents"]
+    end
+
+    ENG --> INS
+
+    REG -. "read-time join (display names)" .-> OUT

@@ -1,0 +1,73 @@
+erDiagram
+    %% ───────── Postgres: registry (the "what is it") ─────────
+    SOLUTIONS  ||--o{ ENDPOINTS   : has
+    ENDPOINTS  ||--o{ BINDINGS    : "path through"
+    WORKFLOWS  ||--o{ BINDINGS    : "path through"
+    AGENTS     ||--o{ BINDINGS    : "path through"
+    COMPONENTS ||--o{ BINDINGS    : "path through"
+
+    %% thresholds point at a path level (deepest non-null FK = target)
+    SOLUTIONS  ||--o{ THRESHOLDS  : applies
+    ENDPOINTS  ||--o{ THRESHOLDS  : applies
+    WORKFLOWS  ||--o{ THRESHOLDS  : applies
+    AGENTS     ||--o{ THRESHOLDS  : applies
+    COMPONENTS ||--o{ THRESHOLDS  : applies
+
+    %% ───────── ClickHouse: the measurements (the "what happened") ─────────
+    AGGREGATED_METRICS ||--|| RAW_SPANS      : "rolled up from"
+    DERIVED_METRICS    ||--|| RAW_SPANS      : "computed from"
+    AGGREGATED_METRICS ||--o{ DERIVED_METRICS : aggregates
+
+    %% ───────── NEW: insights output (Postgres) ─────────
+    INCIDENTS  ||--o{ INSIGHTS        : groups
+    THRESHOLDS ||--o{ INSIGHTS        : "rule that fired"
+
+    %% ───────── cross-store logical links (string ids, not FKs) ─────────
+    AGGREGATED_METRICS }o--o{ INSIGHTS : "observed value for"
+    SOLUTIONS  }o--o{ INSIGHTS : "about (string id)"
+    AGENTS     }o--o{ INSIGHTS : "about (string id)"
+    COMPONENTS }o--o{ INSIGHTS : "about (string id)"
+
+    THRESHOLDS {
+        uuid   id PK
+        enum   category "= lens"
+        text   metric_name
+        enum   scope
+        text   operator "gt|lt"
+        float  warning_value
+        float  critical_value
+        text   time_window
+    }
+    AGGREGATED_METRICS {
+        string solution_id
+        string scope
+        string metric
+        string component_id
+        datetime ts "1-min bucket"
+        agg    quantiles "tdigest"
+        agg    avg_value
+    }
+    INSIGHTS {
+        uuid   id PK
+        text   fingerprint "dedup key"
+        enum   lens
+        enum   detection_mode "threshold|drift"
+        enum   severity "high|med|low"
+        enum   status "open|resolved"
+        string solution_id "path (string ids)"
+        string agent_id
+        string component_id
+        text   metric
+        float  observed_value
+        float  threshold_value
+        uuid   incident_id FK
+        uuid   threshold_id FK
+    }
+    INCIDENTS {
+        uuid  id PK
+        float confidence "0..1"
+        enum  severity
+        enum  status
+        string root_entity "suspected cause"
+        int   member_count
+    }

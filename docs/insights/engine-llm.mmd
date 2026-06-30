@@ -1,0 +1,43 @@
+flowchart TB
+    subgraph IN["Inputs"]
+        direction LR
+        CH["ClickHouse<br/>aggregated_metrics<br/>(observed values + history)"]
+        THR["Postgres<br/>thresholds (rules)"]
+    end
+
+    subgraph ENGINE["Insights Engine - deterministic rules core (poll loop)"]
+        direction LR
+        S1["1 SCAN"] --> S2["2 DETECT<br/>threshold / drift"]
+        S2 --> S3["3 CLASSIFY<br/>severity hi/med/lo"]
+        S3 --> S4["4 CORRELATE<br/>group into incidents<br/>+ confidence"]
+        S4 --> S5["5 RECONCILE<br/>open / update / resolve"]
+        S5 --> S6["6 PERSIST"]
+    end
+
+    subgraph LLM["LLM enrichment layer (Claude) - gated, cached, batched"]
+        direction TB
+        REC["Recommendation"]
+        ROOT["Root-cause hypothesis<br/>+ borderline grouping"]
+        SUM["Plain-English summary"]
+        NOTE["Only high-severity insights<br/>+ incident level<br/>cache by content hash - async<br/>default claude-opus-4-8<br/>(haiku-4-5 for volume summaries)"]
+    end
+
+    subgraph OUT["Postgres - insights store"]
+        direction LR
+        INS["insights"]
+        INC["incidents"]
+    end
+
+    CH --> S1
+    THR --> S1
+
+    S3 -. "high-severity only" .-> REC
+    S4 -. "per incident" .-> ROOT
+    S6 -. "post-persist" .-> SUM
+
+    ROOT -. "narrative + ranked cause" .-> S4
+
+    S6 --> INS
+    INS --> INC
+    REC -. "recommendation field" .-> INS
+    SUM -. "writes summary" .-> INC

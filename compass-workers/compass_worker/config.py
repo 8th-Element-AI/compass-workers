@@ -204,6 +204,30 @@ class Config(BaseSettings):
     )
 
 
+    # ── Insights Engine ──────────────────────────────────────
+    # The engine is interval-driven (evaluates current state), not span-fetch.
+    insights_tick_sec: float = Field(
+        default=45.0, alias="COMPASS_INSIGHTS_TICK_SEC"
+    )  # how often to re-evaluate; ~30-60s matches the 1-min metric grain
+    insights_baseline_days: int = Field(
+        default=7, alias="COMPASS_INSIGHTS_BASELINE_DAYS"
+    )  # drift baseline lookback (hardcoded default; see docs/insights.md)
+    insights_drift_enabled: bool = Field(
+        default=True, alias="COMPASS_INSIGHTS_DRIFT_ENABLED"
+    )
+    insights_drift_cutoff: float = Field(
+        default=0.5, alias="COMPASS_INSIGHTS_DRIFT_CUTOFF"
+    )  # |current-baseline|/baseline >= cutoff → drift insight (0.5 = 50%)
+    insights_drift_min_samples: int = Field(
+        default=20, alias="COMPASS_INSIGHTS_DRIFT_MIN_SAMPLES"
+    )  # need enough baseline data points before trusting drift
+    insights_llm_enabled: bool = Field(
+        default=False, alias="COMPASS_INSIGHTS_LLM_ENABLED"
+    )  # optional Claude enrichment layer (off by default)
+    insights_agg_table: str = Field(
+        default="compass_aggregated_metrics", alias="COMPASS_INSIGHTS_AGG_TABLE"
+    )  # aggregated-metrics table name (override for the signal_* prefix / migrations)
+
     def batch_for(self, lens: str) -> int:
         """Per-lens batch_size with fallback to the global WORKER_BATCH.
  
