@@ -49,15 +49,15 @@ RAW_COLS: list[str] = [
 # These are excluded from the metadata blob to avoid duplication.
 _DEDICATED_KEYS: frozenset[str] = frozenset({
     "correlation_id", "session_id", "span_type", "scope",
-    "solution_id", "endpoint", "workflow_id", "agent_id",
-    "component_id", "component_type", "pipeline_stage", "stage_order",
+    "solution_name", "endpoint_name", "workflow_name", "agent_name",
+    "component_name", "component_type", "pipeline_stage", "stage_order",
     "entity_type", "environment", "region",
-    # compass-namespaced variants from instrumented SDKs
-    "compass.correlation_id", "compass.session_id", "compass.span_type",
-    "compass.scope", "compass.solution_id", "compass.endpoint",
-    "compass.workflow_id", "compass.agent_id", "compass.component_id",
-    "compass.component_type", "compass.pipeline_stage", "compass.stage_order",
-    "compass.entity_type",
+    # # compass-namespaced variants from instrumented SDKs
+    # "compass.correlation_id", "compass.session_id", "compass.span_type",
+    # "compass.scope", "compass.solution_id", "compass.endpoint",
+    # "compass.workflow_id", "compass.agent_id", "compass.component_id",
+    # "compass.component_type", "compass.pipeline_stage", "compass.stage_order",
+    # "compass.entity_type",
 })
 
 
@@ -90,32 +90,31 @@ def map_span(row: dict) -> dict:
     duration_ns: int = row.get("Duration") or 0
     ended_at: datetime = started_at + timedelta(microseconds=duration_ns / 1_000)
 
-    # ── span_type ─────────────────────────────────────────────────────────────
-    span_type = (
-        _pick(attrs, "compass.span_type", "span_type")
-        or SPAN_KIND_TO_TYPE.get((row.get("SpanKind") or "").upper(), "workflow")
-    )
-
     # ── span_status ───────────────────────────────────────────────────────────
     span_status = STATUS_CODE_MAP.get(
         (row.get("StatusCode") or "").upper(), "ok"
     )
 
-    # ── scope ─────────────────────────────────────────────────────────────────
-    # Fall back to 'solution' for root spans (no parent), 'component' otherwise.
-    scope = _pick(attrs, "compass.scope", "scope") or (
-        "solution" if not (row.get("ParentSpanId") or "").strip() else "component"
-    )
+
+    # ── span_type ─────────────────────────────────────────────────────────────
+    # For endpoint/workflow/agent scopes, span_type mirrors the scope.
+    # For component scope, span_type is the component_type (model_call, retrieval, etc.).
+    component_type = _pick(attrs, "component_type")
+    scope = _pick(attrs, "scope")
+    if scope in ("endpoint", "workflow", "agent"):
+        span_type = scope
+    else:
+        span_type = component_type
 
     # ── solution_id ───────────────────────────────────────────────────────────
     solution_id = (
-        _pick(attrs, "compass.solution_id", "solution_id")
+        _pick(attrs, "solution_name")
         or (row.get("ServiceName") or "")
     )
 
     # ── environment ───────────────────────────────────────────────────────────
     environment = (
-        _pick(attrs, "compass.environment", "environment")
+        _pick(attrs, "environment")
         or resource.get("deployment.environment", "")
     )
 
@@ -127,7 +126,7 @@ def map_span(row: dict) -> dict:
     )
 
     # ── stage_order ───────────────────────────────────────────────────────────
-    stage_order_raw = _pick(attrs, "compass.stage_order", "stage_order")
+    stage_order_raw = _pick(attrs, "stage_order")
     try:
         stage_order = int(stage_order_raw) if stage_order_raw else None
     except (ValueError, TypeError):
@@ -158,23 +157,28 @@ def map_span(row: dict) -> dict:
         "trace_id":       row.get("TraceId")      or "",
         "span_id":        row.get("SpanId")        or "",
         "parent_span_id": row.get("ParentSpanId")  or "",
-        "correlation_id": _pick(attrs, "compass.correlation_id", "correlation_id"),
-        "session_id":     _pick(attrs, "compass.session_id",     "session_id"),
+        "correlation_id": _pick(attrs, "correlation_id"),
+        "session_id":     _pick(attrs, "session_id"),
         "span_type":      span_type,
         "span_name":      row.get("SpanName") or "",
         "span_status":    span_status,
         "scope":          scope,
         "solution_id":    solution_id,
-        "endpoint":       _pick(attrs, "compass.endpoint",       "endpoint"),
-        "workflow_id":    _pick(attrs, "compass.workflow_id",    "workflow_id"),
-        "agent_id":       _pick(attrs, "compass.agent_id",       "agent_id"),
-        "component_id":   _pick(attrs, "compass.component_id",   "component_id"),
-        "component_type": _pick(attrs, "compass.component_type", "component_type"),
+        "endpoint":       _pick(attrs, "endpoint_name"),
+        "workflow_id":    _pick(attrs, "workflow_name"),
+        "agent_id":       _pick(attrs, "agent_name"),
+        "component_id":   (
+            _pick(attrs, "metadata.model", "gen_ai.request.model", "llm.model")
+            or _pick(attrs, "component_name")
+            if span_type == "model"
+            else _pick(attrs, "component_name")
+        ),
+        "component_type": component_type,
         "started_at":     started_at,
         "ended_at":       ended_at,
-        "pipeline_stage": _pick(attrs, "compass.pipeline_stage", "pipeline_stage"),
+        "pipeline_stage": _pick(attrs, "pipeline_stage"),
         "stage_order":    stage_order,
-        "entity_type":    _pick(attrs, "compass.entity_type",    "entity_type"),
+        "entity_type":    _pick(attrs, "entity_type"),
         "service":        row.get("ServiceName") or "",
         "environment":    environment,
         "region":         region,
