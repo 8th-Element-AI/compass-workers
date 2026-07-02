@@ -12,6 +12,9 @@ __pycache__/
 build/
 dist/
 
+models/
+
+
 # ---- Virtual environments ----
 .venv/
 venv/
@@ -58,7 +61,6 @@ Thumbs.db
 test_scripts
 
 reports/
-
 
 
 
