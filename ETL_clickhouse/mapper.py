@@ -18,13 +18,46 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
-# OTel SpanKind → Compass span_type (used only when no explicit attribute present)
-SPAN_KIND_TO_TYPE: dict[str, str] = {
-    "SERVER":   "solution",
-    "CLIENT":   "model_call",
-    "INTERNAL": "workflow",
-    "PRODUCER": "workflow",
-    "CONSUMER": "agent",
+# Raw component_type values → canonical span_type for component-scoped spans.
+# Handles common naming variants from different SDKs / instrumentations.
+COMPONENT_TYPE_MAP: dict[str, str] = {
+    # LLM / model inference
+    "model":          "model_call",
+    "model_call":     "model_call",
+    "llm":            "model_call",
+    "chat":           "model_call",
+    "completion":     "model_call",
+    "inference":      "model_call",
+    # Retrieval / vector search
+    "retrieval":      "retrieval",
+    "retriever":      "retrieval",
+    "vector_db":      "retrieval",
+    "vectordb":       "retrieval",
+    "vector_store":   "retrieval",
+    "kb":             "retrieval",
+    "knowledge_base": "retrieval",
+    "search":         "retrieval",
+    # Tool / function call
+    "tool":           "tool_call",
+    "tool_call":      "tool_call",
+    "function":       "tool_call",
+    "function_call":  "tool_call",
+    "api":            "tool_call",
+    "action":         "tool_call",
+    # Embedding
+    "embedding":      "embedding",
+    "embed":          "embedding",
+    "embedder":       "embedding",
+    "embeddings":     "embedding",
+    # Validation
+    "validation":     "validation",
+    "validator":      "validation",
+    "validate":       "validation",
+    # Skill / batch execution
+    "skill_exec":     "skill_exec",
+    "skill":          "skill_exec",
+    "batch":          "skill_exec",
+    "executor":       "skill_exec",
 }
 
 # OTel StatusCode → Compass span_status
@@ -96,15 +129,20 @@ def map_span(row: dict) -> dict:
     )
 
 
+    # ── scope ─────────────────────────────────────────────────────────────────
+    # Fall back to 'endpoint' for root spans (no parent), 'component' otherwise.
+    scope = _pick(attrs, "scope") or (
+        "endpoint" if not (row.get("ParentSpanId") or "").strip() else "component"
+    )
+
     # ── span_type ─────────────────────────────────────────────────────────────
-    # For endpoint/workflow/agent scopes, span_type mirrors the scope.
-    # For component scope, span_type is the component_type (model_call, retrieval, etc.).
+    # endpoint/workflow/agent → span_type mirrors scope.
+    # component → map component_type to canonical span_type via COMPONENT_TYPE_MAP.
     component_type = _pick(attrs, "component_type")
-    scope = _pick(attrs, "scope")
     if scope in ("endpoint", "workflow", "agent"):
         span_type = scope
     else:
-        span_type = component_type
+        span_type = COMPONENT_TYPE_MAP.get(component_type.lower().strip(), component_type)
 
     # ── solution_id ───────────────────────────────────────────────────────────
     solution_id = (
@@ -168,9 +206,9 @@ def map_span(row: dict) -> dict:
         "workflow_id":    _pick(attrs, "workflow_name"),
         "agent_id":       _pick(attrs, "agent_name"),
         "component_id":   (
-            _pick(attrs, "metadata.model", "gen_ai.request.model", "llm.model")
+            _pick(attrs, "model_name", "gen_ai.request.model", "llm.model")
             or _pick(attrs, "component_name")
-            if span_type == "model"
+            if span_type == "model_call"
             else _pick(attrs, "component_name")
         ),
         "component_type": component_type,
