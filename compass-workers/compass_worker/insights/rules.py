@@ -51,7 +51,10 @@ _LOAD_SQL = """
         th.warning_value,
         th.critical_value,
         s.solution_id                    AS sol_slug,
-        COALESCE(e.endpoint_id, '')      AS ep_slug,
+        -- ClickHouse stores the endpoint as the URL path (e.g. /api/v1/extract),
+        -- not the registry slug (ep_extract_v1). Resolve to endpoints.path so the
+        -- rule's path matches what the aggregated rows actually carry.
+        COALESCE(e.path, '')             AS ep_slug,
         COALESCE(w.workflow_id, '')      AS wf_slug,
         COALESCE(a.agent_id, '')         AS ag_slug,
         COALESCE(c.component_id, '')     AS comp_slug,

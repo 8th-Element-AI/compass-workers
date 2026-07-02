@@ -225,7 +225,7 @@ class BaseWorker:
 
         q = f"""
             SELECT *
-            FROM compass_raw_spans
+            FROM signal_raw_spans
             WHERE recorded_at > %(since)s
               {partition_clause}
               {span_types_clause}
@@ -252,7 +252,7 @@ class BaseWorker:
         if dedup_token:
             settings["insert_deduplication_token"] = dedup_token
         self.ch().insert(
-            "compass_derived_metrics",
+            "signal_derived_metrics",
             data,
             column_names=DER_COLS,
             settings=settings,
